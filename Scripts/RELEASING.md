@@ -73,3 +73,18 @@ notarization, archive/feed signatures and uploaded-byte integrity. They do not
 launch the main app or prove the interactive update flow. When the user authorizes
 an app launch, verify a real old-to-new update on a separate test profile,
 including an active chat, persisted history and failed-download recovery.
+
+## Notarization client troubleshooting
+
+Progress output is explicitly disabled, including for JSON submissions, to avoid
+progress-formatting crashes observed with notarytool 1.1.0 on macOS 26.6.2.
+If Xcode selects an older client than the installed Command Line Tools, select a
+client for this release without changing the system toolchain:
+
+```sh
+THOUGHTSTREAM_NOTARYTOOL=/Library/Developer/CommandLineTools/usr/bin/notarytool python3 Scripts/Release-Beta.py --publish
+```
+
+A transport failure or client crash is not an Apple rejection or proof of invalid
+credentials. Client diagnostics remain in the private release work directory.
+Check the submission status before retrying. Never publish those diagnostic logs.
