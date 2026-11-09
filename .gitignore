@@ -1,0 +1,35 @@
+.build/
+build/
+.DS_Store
+.swiftpm/
+Tooling/CodeAnalysis/node_modules/
+
+# Local credentials, signing material, user data and generated files
+.env
+.env.*
+!.env.example
+*.p8
+*.p12
+*.pfx
+*.key
+*.pem
+*.cer
+*.certSigningRequest
+*.mobileprovision
+*.provisionprofile
+*.keychain*
+__pycache__/
+*.py[cod]
+*.log
+
+# Provider account files must never be committed
+auth.json
+credentials.json
+.netrc
+.npmrc
+.pypirc
+
+# Downloaded executable dependencies and generated icons
+Sources/Unfold/Tools/ruff-arm64
+Sources/Unfold/Tools/ruff-x86_64
+Resources/*.icns

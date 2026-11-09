@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>ThoughtStream</string>
+<key>CFBundleDisplayName</key><string>ThoughtStream</string>
+<key>CFBundleIdentifier</key><string>app.unfold.native</string>
+<key>CFBundleExecutable</key><string>ThoughtStream</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>0.9.0</string>
+<key>CFBundleVersion</key><string>27</string>
+<key>SUFeedURL</key><string>https://raw.githubusercontent.com/ricburton/thoughtstream-releases/main/appcast.xml</string>
+<key>SUPublicEDKey</key><string>m3PLPV7PppcUGRCyI+sjE/vIaJ0h7HW83kAEE4PGvQg=</string>
+<key>SUEnableAutomaticChecks</key><true/>
+<key>SUScheduledCheckInterval</key><integer>14400</integer>
+<key>SUAutomaticallyUpdate</key><false/>
+<key>SUAllowsAutomaticUpdates</key><false/>
+<key>SUEnableSystemProfiling</key><false/>
+<key>SUVerifyUpdateBeforeExtraction</key><true/>
+<key>SURequireSignedFeed</key><true/>
+<key>CFBundleIconFile</key><string>ThoughtStream</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSHumanReadableCopyright</key><string>Independent local prototype, 2026</string>
+</dict></plist>

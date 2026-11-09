@@ -1,0 +1,16 @@
+[
+  {
+    "name": "ruff",
+    "version": "0.17.1",
+    "architecture": "arm64",
+    "url": "https://files.pythonhosted.org/packages/8e/71/7a9029a81c8206ee01a98f6cfeeb56e6c095af86857581a37045c46d7e94/ruff-0.17.1-py3-none-macosx_11_0_arm64.whl",
+    "sha256": "29b454f18ca3eeaf37fbf140841dcf27d36109e29dee9aae8acecb68c26c6f74"
+  },
+  {
+    "name": "ruff",
+    "version": "0.17.1",
+    "architecture": "x86_64",
+    "url": "https://files.pythonhosted.org/packages/aa/d2/a2e28bc35b083ae51fa07dfba5280a667c8b01ecaee7802fc8849dcd5c46/ruff-0.17.1-py3-none-macosx_10_12_x86_64.whl",
+    "sha256": "8eadb09a788010be29c895418bdfa513e4e1c65e64b94e5b19e4cd381f6cc7fb"
+  }
+]
