@@ -8,6 +8,7 @@ import base64
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import plistlib
 import re
@@ -21,6 +22,7 @@ SPARKLE_VERSION = "2.10.1"
 SPARKLE_SHA256 = "1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27"
 KEY_ACCOUNT = "ThoughtStream"
 REPOSITORY = "ricburton/thoughtstream-releases"
+NOTARYTOOL = [os.environ["THOUGHTSTREAM_NOTARYTOOL"]] if os.environ.get("THOUGHTSTREAM_NOTARYTOOL") else ["xcrun", "notarytool"]
 
 
 def run(*command, **kwargs):
@@ -101,18 +103,22 @@ def sign_app(app, identity, work):
 def notarize(app, profile, work):
     payload = work / "Notarization.zip"
     run("ditto", "-c", "-k", "--keepParent", "--norsrc", "--noextattr", app, payload)
-    result = subprocess.run(["xcrun", "notarytool", "submit", str(payload), "--keychain-profile", profile,
-                             "--wait", "--output-format", "json"], capture_output=True, text=True)
+    result = subprocess.run([*NOTARYTOOL, "submit", str(payload), "--keychain-profile", profile,
+                             "--wait", "--no-progress", "--output-format", "json"], capture_output=True, text=True)
     (work / "notarization-result.json").write_text(result.stdout)
     if result.stderr:
-        print(result.stderr, file=sys.stderr, flush=True)
+        (work / "notarization-stderr.log").write_text(result.stderr)
+        print(f"Notarization client diagnostics saved under {work}", file=sys.stderr, flush=True)
     try:
         receipt = json.loads(result.stdout)
     except json.JSONDecodeError:
-        raise SystemExit(f"Notarization could not start. Configure Keychain profile {profile!r}; see Scripts/RELEASING.md.")
+        if "No Keychain password item found" in result.stderr:
+            raise SystemExit(f"Configure Keychain profile {profile!r}; see Scripts/RELEASING.md.")
+        reason = f"crashed with signal {-result.returncode}" if result.returncode < 0 else f"failed with exit code {result.returncode}"
+        raise SystemExit(f"Notarization client {reason} without a receipt. Nothing was published. Check the saved diagnostics and Apple submission status before retrying: {work}")
     if result.returncode or receipt.get("status") != "Accepted":
         if receipt.get("id"):
-            log = subprocess.run(["xcrun", "notarytool", "log", receipt["id"], "--keychain-profile", profile], capture_output=True, text=True)
+            log = subprocess.run([*NOTARYTOOL, "log", receipt["id"], "--keychain-profile", profile], capture_output=True, text=True)
             (work / "notarization-log.json").write_text(log.stdout)
         raise SystemExit(f"Notarization not accepted: {receipt}. Nothing was published. Logs: {work}")
     run("xcrun", "stapler", "staple", app)
