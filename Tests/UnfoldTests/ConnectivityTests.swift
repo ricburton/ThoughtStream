@@ -36,11 +36,88 @@ final class ConnectivityTests: XCTestCase {
         XCTAssertEqual(policy.state, .offline)
         for index in 0..<100 {
             policy.record(success: false, at: Double(100 + index * 30))
-            XCTAssertEqual(policy.nextDelay, 5)
+            XCTAssertEqual(policy.nextDelay, 2, "A joined network without Internet is retried every two seconds, however long it lasts")
         }
+        policy.hasRoute = false
+        XCTAssertEqual(policy.nextDelay, 5, "With no interface at all, a route change wakes the monitor")
+        policy.hasRoute = true
         policy.record(success: true, at: 4000)
         XCTAssertEqual(policy.nextDelay, 30)
         XCTAssertEqual(policy.state, .online)
+    }
+
+    func testWeakLinkIsMeasuredAndCheckedMoreOften() {
+        var policy = ConnectivityStability()
+        policy.record(success: true, at: 0)
+        XCTAssertEqual(policy.nextDelay, 30)
+        policy.degraded = true
+        XCTAssertEqual(policy.nextDelay, 8)
+        policy.record(success: false, at: 1)
+        XCTAssertEqual(policy.nextDelay, 2, "Any failure is rechecked quickly")
+
+        var quality = LinkQuality()
+        XCTAssertEqual(quality.grade, .unknown)
+        XCTAssertNil(quality.summary)
+        quality.record(latency: 0.12)
+        XCTAssertEqual(quality.grade, .good)
+        XCTAssertFalse(quality.isDegraded)
+        quality.record(latency: 2.4)
+        XCTAssertEqual(quality.latency ?? 0, 1.26, accuracy: 0.001, "Round trips are smoothed, not taken one at a time")
+        XCTAssertEqual(quality.grade, .slow)
+        quality.bytesPerSecond = 42_000
+        XCTAssertEqual(quality.summary, "42 kB/s · 1.3 s")
+        quality.bytesPerSecond = 3_100
+        XCTAssertEqual(quality.grade, .crawling)
+        XCTAssertEqual(quality.rateDescription, "3.1 kB/s")
+        quality = LinkQuality(latency: 0.09, bytesPerSecond: 4_200_000)
+        XCTAssertEqual(quality.grade, .good)
+        XCTAssertEqual(quality.summary, "4.2 MB/s · 90 ms")
+        XCTAssertNil(LinkThroughputProbe.rate(bytes: 0, firstByte: 1, lastByte: 2))
+        XCTAssertEqual(LinkThroughputProbe.rate(bytes: 40_000, firstByte: 10, lastByte: 12), 20_000)
+    }
+
+    @MainActor
+    func testPillNamesTheOutageRetryCountOrTheMeasuredRate() {
+        XCTAssertNil(OfflineWindowIndicator.message(state: .online, quality: LinkQuality(latency: 0.1), failedChecks: 0))
+        XCTAssertNil(OfflineWindowIndicator.message(state: .checking, quality: LinkQuality(), failedChecks: 2))
+        XCTAssertEqual(OfflineWindowIndicator.message(state: .offline, quality: LinkQuality(), failedChecks: 3)?.text, "Offline Mode")
+        let retrying = OfflineWindowIndicator.message(state: .offline, quality: LinkQuality(), failedChecks: 41)
+        XCTAssertEqual(retrying?.text, "Offline · retry 41")
+        XCTAssertEqual(retrying?.tone, .offline)
+        let slow = OfflineWindowIndicator.message(state: .online, quality: LinkQuality(latency: 1.8, bytesPerSecond: 42_000), failedChecks: 0)
+        XCTAssertEqual(slow?.text, "Slow connection · 42 kB/s · 1.8 s")
+        XCTAssertEqual(slow?.tone, .slow)
+        let pill = OfflinePillView(frame: NSRect(x: 0, y: 0, width: 150, height: 42))
+        let plain = pill.preferredWidth
+        pill.show("Very slow connection · 3.1 kB/s · 2.9 s", tone: .slow)
+        XCTAssertGreaterThan(pill.preferredWidth, plain)
+        XCTAssertEqual(pill.accessibilityLabel(), "Very slow connection · 3.1 kB/s · 2.9 s")
+    }
+
+    @MainActor
+    func testRecoveryFromAnOutageSamplesTheDataRateOnce() async {
+        let samples = ProbeCounter(), route = SimulatedRoute()
+        let monitor = ConnectivityMonitor(usesSystemEvents: false, probe: { await route.isAvailable },
+                                          throughput: { await samples.increment(); return 12_000 })
+        let measured = expectation(description: "Weak link measured after recovery")
+        let observer = NotificationCenter.default.addObserver(forName: .connectivityQualityDidChange, object: monitor, queue: .main) { _ in
+            MainActor.assumeIsolated { if monitor.quality.bytesPerSecond != nil { measured.fulfill() } }
+        }
+        defer { monitor.stop(); NotificationCenter.default.removeObserver(observer) }
+        monitor.start()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let early = await samples.count
+        XCTAssertEqual(early, 0, "Nothing is measured while the link is down")
+        XCTAssertGreaterThan(monitor.failedChecks, 0)
+        await route.restore()
+        monitor.checkNow()
+        await fulfillment(of: [measured], timeout: 6)
+        XCTAssertTrue(monitor.isOnline)
+        XCTAssertEqual(monitor.quality.bytesPerSecond, 12_000)
+        XCTAssertEqual(monitor.quality.grade, .slow)
+        XCTAssertEqual(monitor.failedChecks, 0)
+        let count = await samples.count
+        XCTAssertEqual(count, 1)
     }
 
     func testOnlyLiveProviderFramesCountAsNetworkActivity() {

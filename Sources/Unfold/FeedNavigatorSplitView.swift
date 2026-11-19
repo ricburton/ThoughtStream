@@ -15,7 +15,17 @@ final class FeedNavigatorSplitView: NSSplitView, NSSplitViewDelegate {
         setAccessibilityLabel("Object navigator and activity")
     }
     required init?(coder: NSCoder) { fatalError("Not implemented") }
-    override var dividerThickness: CGFloat { 8 }
+    override var dividerThickness: CGFloat { navigatorHidden ? 0 : 8 }
+    /// A cramped pane gives the whole width to the activity feed. The chosen
+    /// navigator width is kept for when there is room again.
+    var navigatorHidden = false {
+        didSet {
+            guard navigatorHidden != oldValue else { return }
+            subviews.first?.isHidden = navigatorHidden
+            resizeSubviews(withOldSize: bounds.size)
+            needsDisplay = true
+        }
+    }
 
     override func drawDivider(in rect: NSRect) {
         FeedPalette.line.setFill()
@@ -40,6 +50,11 @@ final class FeedNavigatorSplitView: NSSplitView, NSSplitViewDelegate {
         let wasArranging = arranging
         arranging = true
         defer { arranging = wasArranging }
+        if navigatorHidden {
+            subviews[0].isHidden = true
+            subviews[1].frame = bounds
+            return
+        }
         super.resizeSubviews(withOldSize: oldSize)
         let requested = preferredWidth ?? max(140, min(210, bounds.width * 0.25))
         setPosition(min(maximumWidth, max(minimumWidth, requested)), ofDividerAt: 0)
@@ -54,7 +69,7 @@ final class FeedNavigatorSplitView: NSSplitView, NSSplitViewDelegate {
     func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat { maximumWidth }
     func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool { false }
     func splitViewDidResizeSubviews(_ notification: Notification) {
-        guard !arranging, let navigator = subviews.first, bounds.width > dividerThickness else { return }
+        guard !arranging, !navigatorHidden, let navigator = subviews.first, bounds.width > dividerThickness else { return }
         preferredWidth = navigator.frame.width
         onResize?()
     }

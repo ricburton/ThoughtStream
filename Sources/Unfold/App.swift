@@ -138,6 +138,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if let splitIndex = view.items.firstIndex(where: { $0.action == #selector(WorkspaceWindow.splitStream(_:)) }), splitIndex > 0 {
             view.items[splitIndex - 1].identifier = NSUserInterfaceItemIdentifier("paneCommandsSeparator")
         }
+        // Tidy any number of panes without closing or reordering their chats.
+        if let singleIndex = view.items.firstIndex(where: { $0.action == #selector(WorkspaceWindow.singlePane(_:)) }) {
+            let arrangeItem = NSMenuItem(title: "Arrange Panes", action: nil, keyEquivalent: "")
+            arrangeItem.identifier = NSUserInterfaceItemIdentifier("paneArrangeMenu")
+            let arrangeMenu = NSMenu(title: "Arrange Panes")
+            arrangeItem.submenu = arrangeMenu
+            for arrangement in PaneArrangement.allCases {
+                let item = arrangeMenu.addItem(withTitle: arrangement.title, action: #selector(WorkspaceWindow.arrangePanes(_:)),
+                                               keyEquivalent: arrangement == .grid ? "g" : "")
+                item.keyEquivalentModifierMask = [.command, .control]
+                item.representedObject = arrangement.rawValue; item.target = workspace
+            }
+            arrangeMenu.addItem(.separator())
+            arrangeMenu.addItem(withTitle: "Even Out Sizes", action: #selector(WorkspaceWindow.balancePanes(_:)), keyEquivalent: "").target = workspace
+            view.insertItem(arrangeItem, at: singleIndex + 1)
+        }
         let layoutItem = NSMenuItem(title: "Layout", action: nil, keyEquivalent: "")
         let layoutMenu = NSMenu(title: "Layout")
         layoutItem.submenu = layoutMenu

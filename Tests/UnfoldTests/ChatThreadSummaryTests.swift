@@ -78,8 +78,13 @@ final class ChatThreadSummaryTests: XCTestCase {
         let coordinator = ChatThreadSummaryCoordinator()
         defer { coordinator.stop(); session.stop(); try? FileManager.default.removeItem(at: root) }
         var calls = 0
-        coordinator.schedule([session], generate: { _, _ in calls += 1; throw CancellationError() }, updated: { XCTFail("Failed summary must not update UI") })
-        try await Task.sleep(nanoseconds: 1_300_000_000)
+        let attempted = expectation(description: "Summary attempted once")
+        attempted.assertForOverFulfill = true
+        XCTAssertTrue(session.isHistoryLoaded)
+        coordinator.schedule([session], generate: { _, _ in
+            calls += 1; attempted.fulfill(); throw CancellationError()
+        }, updated: { XCTFail("Failed summary must not update UI") })
+        await fulfillment(of: [attempted], timeout: 10)
         XCTAssertEqual(calls, 1)
         XCTAssertEqual(session.sidebarTitle, "Original label")
     }

@@ -80,6 +80,15 @@ final class ConversationResizeHandle: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let active = hovering || startY != nil
+        if InterfaceStyle.isBreathe {
+            // A short grabber that only firms up under the pointer.
+            FeedPalette.canvas.setFill()
+            NSRect(x: bounds.midX - 24, y: bounds.midY - 3, width: 48, height: 6).fill()
+            FeedPalette.muted.withAlphaComponent(active ? 0.85 : 0.35).setFill()
+            NSBezierPath(roundedRect: NSRect(x: bounds.midX - 16, y: bounds.midY - 2, width: 32, height: 4),
+                         xRadius: 2, yRadius: 2).fill()
+            return
+        }
         let pill = NSBezierPath(roundedRect: NSRect(x: bounds.midX - 27, y: bounds.midY - 6, width: 54, height: 12),
                                 xRadius: 6, yRadius: 6)
         FeedPalette.input.setFill(); pill.fill()

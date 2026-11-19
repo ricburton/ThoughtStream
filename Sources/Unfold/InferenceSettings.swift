@@ -17,7 +17,11 @@ struct InferenceSettings: Codable, Equatable {
         ("haiku", "Haiku 5.5"), ("claude-haiku-4-5-20251001", "Haiku 4.5")]
     static let claudeEfforts = ["low", "medium", "high", "xhigh", "max"]
     static func tiers(for provider: AgentProvider) -> [String] {
-        provider == .claude ? ["default", "fast"] : tiers
+        switch provider {
+        case .claude: return ["default", "fast"]
+        case .local: return ["default"]
+        case .codex: return tiers
+        }
     }
     /// Standard is safe before discovery. Accelerated tiers require this runtime's
     /// model/account catalog, rather than general API availability.
@@ -37,12 +41,32 @@ struct InferenceSettings: Codable, Equatable {
         resolved.tier = supported.contains(requested) ? requested : supported.contains("fast") ? "fast" : "default"
         return resolved
     }
-    static func supportsClaudeFastMode(_ model: String) -> Bool {
+    /// An explicit model change can require a different effort. With no
+    /// advertised choices, retain the user's value for custom/future models.
+    func resolvingEffort(in catalog: [[String: Any]]) -> InferenceSettings {
+        guard let record = Self.modelRecord(for: model, in: catalog) else { return self }
+        let efforts = (record["supportedReasoningEfforts"] as? [[String: Any]] ?? [])
+            .compactMap { $0["reasoningEffort"] as? String }.filter { !$0.isEmpty }
+        guard let first = efforts.first, !efforts.contains(effort) else { return self }
+        var resolved = self
+        let suggested = record["defaultReasoningEffort"] as? String
+        resolved.effort = suggested.flatMap { efforts.contains($0) ? $0 : nil } ?? first
+        return resolved
+    }
+    static func modelRecord(for model: String, in catalog: [[String: Any]]) -> [String: Any]? {
+        catalog.first { ($0["model"] as? String ?? $0["id"] as? String) == model }
+            ?? catalog.first { $0["value"] as? String == model || $0["resolvedModel"] as? String == model }
+    }
+    static func supportsClaudeFastMode(_ model: String, in catalog: [[String: Any]] = []) -> Bool {
+        if let supported = modelRecord(for: model, in: catalog)?["supportsFastMode"] as? Bool { return supported }
         let name = model.lowercased().components(separatedBy: "[")[0]
         return name == "opus" || name.range(of: #"^(?:claude-)?opus-(?:4[.-]8|5(?:[.-]5)?)(?:-\d{8})?$"#, options: .regularExpression) != nil
     }
-    var claudeFastModeEnabled: Bool { tier == "fast" && Self.supportsClaudeFastMode(model) }
     static func load(from defaults: UserDefaults = .standard, provider: AgentProvider = .codex) -> InferenceSettings {
+        if provider == .local {
+            // Empty until a local model is chosen; the first one found is used then.
+            return InferenceSettings(model: defaults.string(forKey: "thoughtstream.local.model") ?? "", effort: "default", tier: "default")
+        }
         if provider == .claude {
             let migrated = defaults.bool(forKey: "thoughtstream.claude.preferredModelMigrated")
             let model = claudeModel(saved: defaults.string(forKey: "thoughtstream.claude.model"), migrated: migrated)
@@ -53,7 +77,7 @@ struct InferenceSettings: Codable, Equatable {
             let tier = defaults.string(forKey: "thoughtstream.claude.tier") ?? "default"
             return InferenceSettings(model: model,
                                      effort: defaults.string(forKey: "thoughtstream.claude.effort") ?? "high",
-                                     tier: tier == "fast" && supportsClaudeFastMode(model) ? "fast" : "default")
+                                     tier: tier == "fast" ? "fast" : "default")
         }
         return InferenceSettings(
             model: defaults.string(forKey: "unfold.inference.model") ?? preferred.model,
@@ -66,10 +90,15 @@ struct InferenceSettings: Codable, Equatable {
         return saved
     }
     func save(to defaults: UserDefaults = .standard, provider: AgentProvider = .codex) {
+        if provider == .local {
+            if !model.isEmpty { defaults.set(model, forKey: "thoughtstream.local.model") }
+            return
+        }
         if provider == .claude {
             defaults.set(model, forKey: "thoughtstream.claude.model")
             defaults.set(effort, forKey: "thoughtstream.claude.effort")
-            defaults.set(claudeFastModeEnabled ? "fast" : "default", forKey: "thoughtstream.claude.tier")
+            // Preserve intent; the connected runtime checks model capabilities.
+            defaults.set(tier == "fast" ? "fast" : "default", forKey: "thoughtstream.claude.tier")
             return
         }
         defaults.set(model, forKey: "unfold.inference.model")
@@ -78,6 +107,7 @@ struct InferenceSettings: Codable, Equatable {
     }
     var displayName: String {
         if model == "gpt-6.1-sol" { return "GPT-6.1 Sol" }
+        if LocalModel.split(model) != nil { return LocalModel.shortName(model) }
         return Self.claudeModels.first { $0.id == model }?.name ?? model
     }
     var summary: String { "\(displayName) · \(effort.capitalized) · \(tier == "default" ? "Standard" : tier.capitalized)" }

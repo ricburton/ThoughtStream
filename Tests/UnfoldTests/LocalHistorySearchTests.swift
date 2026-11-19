@@ -84,6 +84,23 @@ final class LocalHistorySearchTests: XCTestCase {
         XCTAssertTrue(LocalHistorySearch.oneEditApart("connector", "connecctor"))
         XCTAssertFalse(LocalHistorySearch.oneEditApart("connector", "container"))
     }
+    func testRecentWarmupSkipsArchiveButExplicitSearchCanIndexItOffline() async throws {
+        let (base, roots) = try fixture(); defer { try? FileManager.default.removeItem(at: base) }
+        try save(roots, id: UUID(), records: [StreamRecord(kind: "You", text: "Archived sapphire", time: Date().addingTimeInterval(-7 * 86400))])
+        try save(roots, id: UUID(), records: [StreamRecord(kind: "You", text: "Recent ruby")])
+        let engine = LocalHistorySearch(roots: roots)
+        let cutoff = Date().addingTimeInterval(-3 * 86400)
+        try await engine.refresh(modifiedSince: cutoff)
+        let recent = try await engine.search("ruby"), initiallyArchived = try await engine.search("sapphire")
+        XCTAssertEqual(recent.count, 1)
+        XCTAssertTrue(initiallyArchived.isEmpty)
+        try await engine.refresh()
+        let archive = try await engine.search("sapphire")
+        XCTAssertEqual(archive.count, 1)
+        try await engine.refresh(modifiedSince: cutoff)
+        let retained = try await engine.search("sapphire")
+        XCTAssertEqual(retained.count, 1, "Recent refresh must not erase the disk-backed archive index")
+    }
     func testWarmSearchAcrossLargeHistoryAndJournalRefresh() async throws {
         let (base, roots) = try fixture(); defer { try? FileManager.default.removeItem(at: base) }
         let id = UUID(), engine = LocalHistorySearch(roots: roots)

@@ -95,13 +95,19 @@ final class NavigatorFocusTests: XCTestCase {
         func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
         let views = descendants(pane.view)
         let overview = try XCTUnwrap(views.compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel()?.hasPrefix("Overview:") == true })
-        XCTAssertGreaterThanOrEqual(overview.enclosingScrollView?.bounds.width ?? 0, 190)
+        // The Overview column keeps its default width; its list sits inside the pane's text inset.
+        XCTAssertGreaterThanOrEqual(overview.enclosingScrollView?.superview?.bounds.width ?? 0, 190)
+        XCTAssertGreaterThanOrEqual(overview.enclosingScrollView?.bounds.width ?? 0, 190 - 2 * PaneSpacing.textInset)
         if let image = pane.view.bitmapImageRepForCachingDisplay(in: pane.view.bounds) {
             pane.view.cacheDisplay(in: pane.view.bounds, to: image)
             try image.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "/tmp/thoughtstream-navigator-focus.png"))
         }
         try await Task.sleep(nanoseconds: 8_900_000_000)
-        XCTAssertEqual(pane.viewState.firstRecord, 2, "Following resumes after the nine-second reading pause")
+        // Long cards open collapsed, so the tail no longer fills the viewport
+        // from one row: check the feed is back at its live edge instead.
+        let feed = try XCTUnwrap(views.compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel() == "Native conversation and live activity" })
+        let visible = try XCTUnwrap(feed.enclosingScrollView).documentVisibleRect
+        XCTAssertEqual(visible.maxY, feed.bounds.maxY, accuracy: 2, "Following resumes after the nine-second reading pause")
 
         pane.append(StreamRecord(kind: "File change", text: patch, language: "diff"))
         try await Task.sleep(nanoseconds: 400_000_000)

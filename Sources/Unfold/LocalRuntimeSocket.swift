@@ -32,6 +32,7 @@ final class LocalRuntimeSocket {
     func close() {
         handle?.readabilityHandler = nil
         try? handle?.close(); handle = nil
+        buffer = Data(); fragments = Data()
     }
 
     private func disconnected() { close(); onDisconnect?() }
@@ -53,7 +54,7 @@ final class LocalRuntimeSocket {
         try handle.write(contentsOf: frame)
     }
 
-    private func receive(_ data: Data) {
+    func receive(_ data: Data) {
         buffer.append(data)
         while buffer.count >= 2 {
             let bytes = [UInt8](buffer.prefix(14))
@@ -70,12 +71,18 @@ final class LocalRuntimeSocket {
             guard buffer.count >= offset + Int(length) else { return }
             let start = buffer.startIndex + offset
             let payload = Data(buffer[start..<(start + Int(length))])
-            buffer.removeFirst(offset + Int(length))
+            let consumed = offset + Int(length)
+            if consumed == buffer.count { buffer = Data() }
+            else if consumed >= 64 * 1024 {
+                // A small remaining frame must not pin a large prior message.
+                let remainder = buffer.dropFirst(consumed)
+                buffer = remainder.withUnsafeBytes { Data($0) }
+            } else { buffer.removeFirst(consumed) }
             switch opcode {
             case 0, 1, 2:
                 fragments.append(payload)
                 guard fragments.count <= 64 * 1024 * 1024 else { disconnected(); return }
-                if final { let message = fragments; fragments.removeAll(keepingCapacity: true); onMessage?(message) }
+                if final { let message = fragments; fragments = Data(); onMessage?(message) }
             case 8: disconnected(); return
             case 9: do { try write(payload, opcode: 10) } catch { disconnected(); return }
             case 10: break

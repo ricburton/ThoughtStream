@@ -20,9 +20,13 @@ final class ModelCatalog {
 
     func models(for provider: AgentProvider) -> [[String: Any]] {
         let available = discovered[provider] ?? []
-        let fallback: [[String: Any]] = provider == .claude
-            ? InferenceSettings.claudeModels.map { ["model": $0.id, "displayName": $0.name] }
-            : [["model": InferenceSettings.preferred.model, "displayName": InferenceSettings.preferred.displayName]]
+        let fallback: [[String: Any]]
+        switch provider {
+        case .claude: fallback = InferenceSettings.claudeModels.map { ["model": $0.id, "displayName": $0.name] }
+        case .codex: fallback = [["model": InferenceSettings.preferred.model, "displayName": InferenceSettings.preferred.displayName]]
+        // Only what is actually on this Mac. An empty list is the truth.
+        case .local: fallback = []
+        }
         // Keep the new release available with an older CLI's cached list, too.
         let seed: [[String: Any]] = provider == .claude
             ? [["model": InferenceSettings.claudePreferredModel, "displayName": "Fable 5.2"]] : []
@@ -46,7 +50,9 @@ final class ModelCatalog {
             var record = record; record["model"] = id
             return record
         }
-        guard !valid.isEmpty, let data = try? JSONSerialization.data(withJSONObject: valid) else { return }
+        // A cloud provider returning nothing is a failed read. Local runtimes
+        // really can have no models, or stop; don't offer ones that are gone.
+        guard !valid.isEmpty || provider == .local, let data = try? JSONSerialization.data(withJSONObject: valid) else { return }
         discovered[provider] = valid; refreshed[provider] = Date()
         defaults?.set(data, forKey: Self.key(provider, "discovered"))
         defaults?.set(refreshed[provider], forKey: Self.key(provider, "refreshed"))
@@ -90,6 +96,10 @@ enum ProviderModelDiscovery {
     /// A fresh transport reads capabilities without attaching to a chat,
     /// submitting a prompt, or changing the running conversation's model.
     static func models(for provider: AgentProvider, executable: URL) async throws -> [[String: Any]] {
+        if provider == .local {
+            await LocalModelRegistry.shared.refresh()
+            return LocalModelRegistry.shared.records
+        }
         let project = FileManager.default.temporaryDirectory.appendingPathComponent("thoughtstream-models-\(UUID())")
         try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: project) }

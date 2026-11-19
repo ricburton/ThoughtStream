@@ -1,5 +1,6 @@
 import AppKit
 import WebKit
+import CryptoKit
 
 extension NSAttributedString.Key {
     static let nativeJSON = NSAttributedString.Key("ThoughtStream.nativeJSON")
@@ -10,7 +11,9 @@ actor NativeImageStore {
     private var cache: [String: Data] = [:]
     private var bytes = 0
     func data(for reference: NativeImageReference, project: URL?) async throws -> Data {
-        let key = (project?.path ?? "") + reference.source
+        // Data URLs can be megabytes long; do not retain them again as keys.
+        let key = SHA256.hash(data: Data(((project?.path ?? "") + reference.source).utf8))
+            .map { String(format: "%02x", $0) }.joined()
         if let data = cache[key] { return data }
         let source = reference.source
         let data: Data
@@ -35,8 +38,13 @@ actor NativeImageStore {
             data = try Data(contentsOf: url, options: .mappedIfSafe)
         }
         guard data.count <= 80 * 1024 * 1024 else { throw CocoaError(.fileReadTooLarge) }
-        if bytes + data.count > 128 * 1024 * 1024 { cache.removeAll(); bytes = 0 }
-        cache[key] = data; bytes += data.count
+        let budget = 32 * 1024 * 1024
+        if data.count <= budget {
+            if bytes + data.count > budget { cache.removeAll(); bytes = 0 }
+            // Another awaiting request may already have filled this entry.
+            bytes -= cache[key]?.count ?? 0
+            cache[key] = data; bytes += data.count
+        }
         return data
     }
 }
@@ -74,12 +82,18 @@ enum NativeFeedLayout {
         layout.ensureLayout(for: container)
         return ceil(layout.usedRect(for: container).height) + 4
     }
+    static func code(_ text: NSAttributedString, source: String, label: String, width: CGFloat) -> (height: CGFloat, collapse: CodeCollapse.State) {
+        let full = textHeight(text, width: width - 24)
+        let state = CodeCollapse.state(text, source: source, label: label, fullHeight: full)
+        if case .collapsed = state { return (42 + CodeCollapse.visibleHeight(text) + 8, state) }
+        return (42 + full + 8, state)
+    }
     static func height(_ block: NativeFeedBlock, width: CGFloat, images: [String: NSImage]) -> CGFloat {
         switch block {
         case .header(_, _, _, let size, let rawSource): return max(rawSource == nil ? 18 : 28, size)
         case .text(let text): return textHeight(text, width: width)
         case .prose(let text, let tone): return textHeight(text, width: width - (tone == .user ? 36 : 20)) + (tone == .user ? 24 : 4)
-        case .code(let text, _, _): return 42 + textHeight(text, width: width - 24) + 8
+        case .code(let text, let source, let label): return code(text, source: source, label: label, width: width).height
         case .html: return 330
         case .image(let reference):
             guard let image = images[reference.source], image.size.width > 0 else { return 240 }
@@ -115,6 +129,14 @@ final class NativeFeedTextView: NSTextView, NSTextViewDelegate {
             streamAnimator = StreamTextAnimator(view: self, state: reveal)
             streamAnimator?.start()
         }
+    }
+    /// A collapsed card lays out only the lines it shows, so nothing is
+    /// typeset or painted past its edge. Zero removes the limit.
+    func setLineLimit(_ lines: Int) {
+        guard let textContainer, textContainer.maximumNumberOfLines != lines else { return }
+        textContainer.maximumNumberOfLines = lines
+        layoutManager?.textContainerChangedGeometry(textContainer)
+        hoverLine = nil; needsDisplay = true
     }
     /// Preserve the text system and selection as a streaming block grows.
     func update(_ text: NSAttributedString, reveal: StreamTextRevealState?) {
@@ -233,18 +255,116 @@ final class NativeFeedTextView: NSTextView, NSTextViewDelegate {
     }
 }
 
+/// Long code, output and JSON open to their first lines. Expansion is
+/// remembered per block for the session, so it survives row recycling.
+@MainActor
+enum CodeCollapse {
+    enum State: Equatable { case short, collapsed(lines: Int), expanded(lines: Int) }
+    static let visibleLines: CGFloat = 12
+    static let thresholdLines: CGFloat = 20
+    private static var expanded = Set<String>()
+    /// Streaming only appends, so a block keeps its key while it grows. The
+    /// label's lint status ("Python · Checking…") is left out: it changes later.
+    static func key(source: String, label: String) -> String {
+        (label.components(separatedBy: " · ").first ?? label) + "\u{0}" + String(source.prefix(512))
+    }
+    static func isExpanded(_ key: String) -> Bool { expanded.contains(key) }
+    static func setExpanded(_ value: Bool, key: String) {
+        if value { expanded.insert(key) } else { expanded.remove(key) }
+    }
+    static func lineHeight(_ text: NSAttributedString) -> CGFloat {
+        guard text.length > 0 else { return 20 }
+        if let style = text.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle, style.minimumLineHeight > 0 {
+            return style.minimumLineHeight
+        }
+        let font = text.attribute(.font, at: 0, effectiveRange: nil) as? NSFont ?? .monospacedSystemFont(ofSize: 13, weight: .regular)
+        return ceil(font.ascender - font.descender + font.leading)
+    }
+    static func visibleHeight(_ text: NSAttributedString) -> CGFloat { ceil(lineHeight(text) * visibleLines) + 4 }
+    static func state(_ text: NSAttributedString, source: String, label: String, fullHeight: CGFloat) -> State {
+        guard fullHeight > lineHeight(text) * thresholdLines else { return .short }
+        let lines = text.string.reduce(1) { $1 == "\n" ? $0 + 1 : $0 }
+        return isExpanded(key(source: source, label: label)) ? .expanded(lines: lines) : .collapsed(lines: lines)
+    }
+}
+
+/// Matches the Copy pill so card actions read as one set.
+@MainActor
+final class FeedPillButton: NSButton {
+    private var hoverArea: NSTrackingArea?
+    private var hovering = false
+    init(title: String, symbol: String, target: AnyObject?, action: Selector?) {
+        super.init(frame: .zero)
+        self.title = title; self.target = target; self.action = action
+        font = Typography.caption; bezelStyle = .inline; isBordered = false
+        imagePosition = .imageLeading; imageHugsTitle = true
+        setSymbol(symbol)
+        wantsLayer = true; layer?.cornerRadius = 7; layer?.borderWidth = 1
+        updateColors()
+    }
+    required init?(coder: NSCoder) { fatalError("Not implemented") }
+    func setSymbol(_ name: String) {
+        image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+    }
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsetsZero }
+    override var intrinsicContentSize: NSSize {
+        let size = super.intrinsicContentSize
+        let textHeight = ceil((font?.ascender ?? 12) - (font?.descender ?? -3))
+        return NSSize(width: size.width + CopyFeedbackButton.padding.width * 2,
+                      height: max(28, textHeight + CopyFeedbackButton.padding.height * 2))
+    }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: .zero, options: [.inVisibleRect, .mouseEnteredAndExited, .activeInKeyWindow], owner: self)
+        addTrackingArea(area); hoverArea = area
+    }
+    override func mouseEntered(with event: NSEvent) { hovering = true; updateColors() }
+    override func mouseExited(with event: NSEvent) { hovering = false; updateColors() }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); updateColors() }
+    private func updateColors() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            contentTintColor = hovering ? FeedPalette.blue : FeedPalette.muted
+            layer?.backgroundColor = hovering ? FeedPalette.blue.cgColor.copy(alpha: 0.08) : FeedPalette.surface.cgColor
+            layer?.borderColor = hovering ? FeedPalette.blue.cgColor.copy(alpha: 0.5) : FeedPalette.line.cgColor
+        }
+    }
+}
+
+/// Fades the last visible lines of a collapsed card; clicking it expands.
+@MainActor
+final class CodeFadeView: NSView {
+    var color: NSColor = FeedPalette.surface { didSet { needsDisplay = true } }
+    var onClick: (() -> Void)?
+    override var isFlipped: Bool { true }
+    override func draw(_ dirtyRect: NSRect) {
+        NSGradient(colors: [color.withAlphaComponent(0), color, color], atLocations: [0, 0.85, 1], colorSpace: .sRGB)?.draw(in: bounds, angle: 90)
+    }
+    override func mouseDown(with event: NSEvent) { onClick?() }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+}
+
 @MainActor
 final class NativeCodeView: NativeFeedCard {
     private(set) var source: String
+    private let label: String
     private let code: NativeFeedTextView
     private let copy: CopyFeedbackButton
     private let diffSummary: NSTextField?
+    private lazy var toggle = FeedPillButton(title: "Expand", symbol: "chevron.down", target: self, action: #selector(toggleExpanded))
+    private let fade = CodeFadeView()
+    private(set) var collapse = CodeCollapse.State.short
+    /// The row re-measures this card after the reader expands or collapses it.
+    var onToggle: ((NativeCodeView) -> Void)?
+    var isCollapsed: Bool { if case .collapsed = collapse { return true }; return false }
     init(text: NSAttributedString, source: String, label: String, reveal: StreamTextRevealState? = nil) {
         self.source = source
+        self.label = label
         code = NativeFeedTextView(text, reveal: reveal)
         copy = CopyFeedbackButton(text: source)
         diffSummary = label == "Diff" ? NSTextField(labelWithString: NativeDiff.summary(text)) : nil
         super.init(frame: .zero)
+        clipsToBounds = true
         headerHeight = 42
         let title = NSTextField(labelWithString: label)
         let isPacket = label == "JSON"
@@ -254,9 +374,15 @@ final class NativeCodeView: NativeFeedCard {
         diffSummary?.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
         diffSummary?.textColor = FeedPalette.muted
         code.setAccessibilityLabel(label == "Diff" ? "Git diff: old and new line numbers, additions marked plus, removals marked minus" : "Code")
-        let header = NSStackView(views: [title] + (diffSummary.map { [$0] } ?? []) + [NSView(), copy]); header.orientation = .horizontal
-        for view in [header, code] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
+        toggle.isHidden = true
+        fade.isHidden = true
+        fade.color = fill == .clear ? FeedPalette.canvas : fill
+        fade.onClick = { [weak self] in self?.setExpanded(true) }
+        let header = NSStackView(views: [title] + (diffSummary.map { [$0] } ?? []) + [NSView(), toggle, copy]); header.orientation = .horizontal
+        for view in [header, code, fade] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
         NSLayoutConstraint.activate([
+            fade.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 1), fade.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1),
+            fade.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -1), fade.heightAnchor.constraint(equalToConstant: 56),
             header.topAnchor.constraint(equalTo: topAnchor, constant: 6), header.heightAnchor.constraint(equalToConstant: 30),
             header.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12), header.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             code.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 6), code.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
@@ -269,6 +395,31 @@ final class NativeCodeView: NativeFeedCard {
         diffSummary?.stringValue = NativeDiff.summary(text)
         code.update(text, reveal: reveal)
     }
+    func setCollapse(_ state: CodeCollapse.State) {
+        guard state != collapse else { return }
+        collapse = state
+        switch state {
+        case .short:
+            toggle.isHidden = true; fade.isHidden = true; code.setLineLimit(0)
+        case .collapsed(let lines):
+            toggle.isHidden = false; fade.isHidden = false; code.setLineLimit(Int(CodeCollapse.visibleLines))
+            toggle.title = "Expand · \(lines) lines"; toggle.setSymbol("chevron.down")
+            toggle.toolTip = "Show the whole \(label == "JSON" ? "payload" : "block")"
+            toggle.setAccessibilityLabel("Expand \(label), \(lines) lines")
+        case .expanded:
+            toggle.isHidden = false; fade.isHidden = true; code.setLineLimit(0)
+            toggle.title = "Collapse"; toggle.setSymbol("chevron.up")
+            toggle.toolTip = "Show only the first lines"
+            toggle.setAccessibilityLabel("Collapse \(label)")
+        }
+        toggle.invalidateIntrinsicContentSize()
+    }
+    func setExpanded(_ expanded: Bool) {
+        guard collapse != .short, isCollapsed == expanded else { return }
+        CodeCollapse.setExpanded(expanded, key: CodeCollapse.key(source: source, label: label))
+        onToggle?(self)
+    }
+    @objc private func toggleExpanded() { setExpanded(isCollapsed) }
     required init?(coder: NSCoder) { fatalError("Not implemented") }
 }
 
@@ -278,7 +429,7 @@ final class NativeFeedHeading: NSView {
     private let rawSource: String?
     init(title: String, time: String, tone: NativeTextTone, size: CGFloat, rawSource: String?) {
         self.rawSource = rawSource
-        color = tone == .reasoning ? FeedPalette.purple : tone == .command ? FeedPalette.green : tone == .error ? FeedPalette.red : FeedPalette.muted
+        color = tone == .reasoning ? FeedPalette.purple : tone == .command ? FeedPalette.green : tone == .error ? FeedPalette.red : tone == .user ? FeedPalette.blue : FeedPalette.muted
         super.init(frame: .zero)
         let name = NSTextField(labelWithString: title); name.font = Typography.prose(ofSize: max(11, size * 0.75), weight: .medium); name.textColor = color
         name.lineBreakMode = .byTruncatingTail; name.toolTip = title
@@ -310,6 +461,7 @@ final class NativeProseView: NativeFeedCard {
         super.init(frame: .zero)
         drawsBorder = false; radius = 12
         if tone == .reasoning { fill = .clear }
+        if tone == .user { fill = FeedPalette.userMessage }
         content.translatesAutoresizingMaskIntoConstraints = false; addSubview(content)
         let side: CGFloat = tone == .user ? 18 : 18, vertical: CGFloat = tone == .user ? 12 : 2
         NSLayoutConstraint.activate([content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: side), content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: tone == .user ? -18 : -2), content.topAnchor.constraint(equalTo: topAnchor, constant: vertical), content.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -vertical)])
@@ -332,7 +484,10 @@ final class NativeFeedRow: NSView {
     private let openHTML: (String) -> Void
     private let openImage: (NSImage) -> Void
     private var layoutWidth: CGFloat
+    private var layoutImages: [String: NSImage] = [:]
     private(set) var contentHeight: CGFloat = 20
+    /// Called after a card inside the row changes height on its own.
+    var onHeightChange: ((NativeFeedRow) -> Void)?
     init(blocks: [NativeFeedBlock], width: CGFloat, images: [String: NSImage], reveal: StreamTextReveal? = nil, accent: NSColor? = nil, openHTML: @escaping (String) -> Void, openImage: @escaping (NSImage) -> Void) {
         self.accent = accent
         self.openHTML = openHTML; self.openImage = openImage
@@ -350,7 +505,7 @@ final class NativeFeedRow: NSView {
     func update(blocks: [NativeFeedBlock], width: CGFloat, images: [String: NSImage],
                 reveal: StreamTextReveal?, accent: NSColor?) -> CGFloat {
         let widthUnchanged = abs(width - layoutWidth) <= 0.5
-        self.accent = accent; layoutWidth = width; needsDisplay = true
+        self.accent = accent; layoutWidth = width; layoutImages = images; needsDisplay = true
         while blockHeights.count > blocks.count {
             blockHeights.removeLast().1.isActive = false
             let child = stack.arrangedSubviews.last!
@@ -388,8 +543,10 @@ final class NativeFeedRow: NSView {
                 case .header(let title, let time, let tone, let size, let rawSource): content = NativeFeedHeading(title: title, time: time, tone: tone, size: size, rawSource: rawSource)
                 case .text(let text): content = NativeFeedTextView(text, reveal: state(text))
                 case .prose(let text, let tone): content = NativeProseView(text: text, tone: tone, reveal: state(text))
-                case .code(let text, let source, let label): content = NativeCodeView(text: text, source: source, label: label, reveal: state(text))
-                case .html(let html): content = NativeHTMLBlock(html: html, open: openHTML)
+                case .code(let text, let source, let label):
+                    let card = NativeCodeView(text: text, source: source, label: label, reveal: state(text))
+                    card.onToggle = { [weak self] in self?.remeasure($0) }
+                    content = card                case .html(let html): content = NativeHTMLBlock(html: html, open: openHTML)
                 case .image(let reference): content = NativeImageBlock(image: images[reference.source], title: reference.title, open: openImage)
                 }
                 if index < blockHeights.count {
@@ -407,9 +564,7 @@ final class NativeFeedRow: NSView {
             blockHeights[index].0 = block
             // Streaming re-renders the whole row, but usually only its last
             // block grows. Skip typesetting blocks whose layout is unchanged.
-            if !(reused && unchanged) {
-                blockHeights[index].1.constant = NativeFeedLayout.height(block, width: width - 28, images: images)
-            }
+            if !(reused && unchanged) { measure(index, width: width, images: images) }
         }
         updateContentHeight()
         return contentHeight
@@ -430,11 +585,26 @@ final class NativeFeedRow: NSView {
     func reflow(width: CGFloat, images: [String: NSImage]) -> CGFloat {
         guard abs(width - layoutWidth) > 0.5 else { return contentHeight }
         layoutWidth = width
-        for (block, constraint) in blockHeights {
-            constraint.constant = NativeFeedLayout.height(block, width: width - 28, images: images)
-        }
+        layoutImages = images
+        for index in blockHeights.indices { measure(index, width: width, images: images) }
         updateContentHeight()
         return contentHeight
+    }
+    private func measure(_ index: Int, width: CGFloat, images: [String: NSImage]) {
+        let (block, constraint) = blockHeights[index]
+        if case .code(let text, let source, let label) = block, let card = stack.arrangedSubviews[index] as? NativeCodeView {
+            let layout = NativeFeedLayout.code(text, source: source, label: label, width: width - 28)
+            card.setCollapse(layout.collapse)
+            constraint.constant = layout.height
+        } else {
+            constraint.constant = NativeFeedLayout.height(block, width: width - 28, images: images)
+        }
+    }
+    private func remeasure(_ card: NativeCodeView) {
+        guard let index = stack.arrangedSubviews.firstIndex(of: card), index < blockHeights.count else { return }
+        measure(index, width: layoutWidth, images: layoutImages)
+        updateContentHeight()
+        onHeightChange?(self)
     }
     private func updateContentHeight() {
         contentHeight = 20 + blockHeights.reduce(0) { $0 + $1.1.constant } + CGFloat(max(0, blockHeights.count - 1)) * 8

@@ -70,7 +70,14 @@ final class CodexConnection {
     func request(_ method: String, _ params: [String: Any] = [:]) async throws -> [String: Any] {
         let id = nextID; nextID += 1
         return try await withCheckedThrowingContinuation { continuation in
-            callbacks[id] = { continuation.resume(with: $0) }
+            callbacks[id] = { result in
+                continuation.resume(with: result.mapError { error in
+                    let response = error as NSError
+                    guard response.domain == "ThoughtStream.CodexResponse" else { return error }
+                    var info = response.userInfo; info["CodexRequestMethod"] = method
+                    return NSError(domain: response.domain, code: response.code, userInfo: info)
+                })
+            }
             do { try send(["id": id, "method": method, "params": params]) }
             catch { callbacks.removeValue(forKey: id); continuation.resume(throwing: error) }
             Task { @MainActor [weak self] in
@@ -102,6 +109,7 @@ final class CodexConnection {
     func respond(_ id: Any, result: [String: Any]) throws { try send(["id": id, "result": result]) }
     func stop(terminateRuntime: Bool = false) {
         socket?.close(); socket = nil
+        buffer = Data()
         output.fileHandleForReading.readabilityHandler = nil; errors.fileHandleForReading.readabilityHandler = nil
         try? input.fileHandleForWriting.close(); process?.terminate()
         if terminateRuntime, let persistentID { CodexRuntimeHost.stop(id: persistentID) }
@@ -122,7 +130,10 @@ final class CodexConnection {
             guard let message = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { continue }
             if ProviderNetworkActivity.codex(message) { onNetworkActivity() }
             if let id = message["id"] as? Int, message["method"] == nil, let callback = callbacks.removeValue(forKey: id) {
-                if let error = message["error"] as? [String: Any] { callback(.failure(Self.error(error["message"] as? String ?? "Codex request failed."))) }
+                if let error = message["error"] as? [String: Any] {
+                    callback(.failure(NSError(domain: "ThoughtStream.CodexResponse", code: error["code"] as? Int ?? -1,
+                                              userInfo: [NSLocalizedDescriptionKey: error["message"] as? String ?? "Codex request failed."])))
+                }
                 else { callback(.success(message["result"] as? [String: Any] ?? [:])) }
             }
             var event = message; event["_direction"] = "incoming"; onEvent?(event)
@@ -136,7 +147,8 @@ final class CodexConnection {
         guard let newline = chunk.lastIndex(of: 10) else { return [] }
         let end = buffer.endIndex - (chunk.endIndex - newline)
         let lines = buffer[..<end].split(separator: 10).map { Data($0) }
-        buffer = Data(buffer[(end + 1)...])
+        let remainder = buffer[(end + 1)...]
+        buffer = remainder.isEmpty ? Data() : remainder.withUnsafeBytes { Data($0) }
         return lines
     }
     static func error(_ message: String) -> NSError { NSError(domain: "ThoughtStream", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }

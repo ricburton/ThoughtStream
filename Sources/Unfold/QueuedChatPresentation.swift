@@ -6,7 +6,15 @@ extension NSAttributedString.Key {
 
 @MainActor
 enum QueuedChatPresentation {
-    static func label(status: String, detail: String?, includeRetry: Bool = true) -> NSAttributedString {
+    /// Set while the Internet is away and a model on this Mac could answer
+    /// instead. Waiting messages then offer to move to it.
+    static var localModelName: String?
+
+    static func link(_ action: String, messageID: String?) -> URL {
+        URL(string: "thoughtstream-queue://\(action)" + (messageID.map { "/" + $0 } ?? ""))!
+    }
+
+    static func label(status: String, detail: String?, includeRetry: Bool = true, messageID: String? = nil) -> NSAttributedString {
         let style = NSMutableParagraphStyle()
         style.paragraphSpacing = 7; style.paragraphSpacingBefore = 3
         let attributes: [NSAttributedString.Key: Any] = [
@@ -19,11 +27,22 @@ enum QueuedChatPresentation {
         if let detail, !detail.isEmpty {
             result.append(NSAttributedString(string: detail + " ", attributes: attributes))
         }
+        var actions: [(String, URL)] = []
         if includeRetry, status == "blocked" || status == "uncertain" {
+            actions.append((status == "uncertain" ? "Check delivery" : "Retry", link("retry", messageID: nil)))
+        }
+        // A message that has not left yet can be moved or taken back.
+        if includeRetry, let messageID, status == "queued" || status == "blocked" {
+            if let localModelName { actions.append(("Answer with \(localModelName) on this Mac", link("local", messageID: messageID))) }
+            actions.append(("Cancel", link("cancel", messageID: messageID)))
+        }
+        for (index, action) in actions.enumerated() {
+            if index > 0 { result.append(NSAttributedString(string: "  ·  ", attributes: attributes)) }
             var link = attributes
-            link[.link] = URL(string: "thoughtstream-queue://retry")!
-            result.append(NSAttributedString(string: status == "uncertain" ? "Check delivery\n" : "Retry\n", attributes: link))
-        } else if detail != nil { result.append(NSAttributedString(string: "\n", attributes: attributes)) }
+            link[.link] = action.1
+            result.append(NSAttributedString(string: action.0, attributes: link))
+        }
+        if !actions.isEmpty || detail != nil { result.append(NSAttributedString(string: "\n", attributes: attributes)) }
         return result
     }
 }

@@ -57,7 +57,10 @@ final class TabSplitHostView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         if InterfaceStyle.hasRoundedPanes {
-            FeedPalette.sidebar.setFill(); bounds.fill()
+            FeedPalette.backdrop.setFill(); bounds.fill()
+        }
+        if InterfaceStyle.isBreathe, let card = subviews.first(where: { $0 is PaneSurface }) {
+            Breathe.drawPaneShadow(around: card.frame)
         }
     }
     override func viewDidChangeEffectiveAppearance() {

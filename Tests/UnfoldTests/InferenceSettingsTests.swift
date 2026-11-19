@@ -21,6 +21,16 @@ final class InferenceSettingsTests: XCTestCase {
         choice.save(to: defaults)
         XCTAssertEqual(InferenceSettings.load(from: defaults), choice)
     }
+    func testModelChangeEffortUsesOnlyAdvertisedChoicesAndLeavesUnknownModelsAlone() {
+        let settings = InferenceSettings(model: "future-model", effort: "max", tier: "default")
+        let supported: [[String: Any]] = [["reasoningEffort": "low"], ["reasoningEffort": "high"]]
+        XCTAssertEqual(settings.resolvingEffort(in: []), settings)
+        XCTAssertEqual(settings.resolvingEffort(in: [["model": settings.model]]), settings)
+        XCTAssertEqual(settings.resolvingEffort(in: [["model": settings.model, "supportedReasoningEfforts": supported, "defaultReasoningEffort": "high"]]).effort, "high")
+        XCTAssertEqual(settings.resolvingEffort(in: [["model": settings.model, "supportedReasoningEfforts": supported, "defaultReasoningEffort": "unadvertised"]]).effort, "low")
+        let compatible = InferenceSettings(model: settings.model, effort: "high", tier: "default")
+        XCTAssertEqual(compatible.resolvingEffort(in: [["model": settings.model, "supportedReasoningEfforts": supported, "defaultReasoningEffort": "low"]]), compatible)
+    }
     @MainActor
     func testModelListRefreshPreservesSelectedDefaults() {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

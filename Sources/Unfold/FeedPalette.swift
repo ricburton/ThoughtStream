@@ -5,6 +5,13 @@ enum FeedPalette {
     static let canvas = color(0xFFFFFF, dark: 0x1E1E20, matrix: 0x000000)
     static let activePane = color(0xF7FAFE, dark: 0x20242B, matrix: 0x010A04)
     static let sidebar = color(0xF3F3F3, dark: 0x262628, matrix: 0x010603)
+    /// What the navigation rail and pane cards sit on: the sidebar colour,
+    /// except that Breathe deepens it at night so its cards read as raised.
+    static let backdrop = NSColor(name: nil) { appearance in
+        let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let value: UInt32 = InterfaceStyle.isMatrix ? 0x010603 : !dark ? 0xF3F3F3 : InterfaceStyle.isBreathe ? 0x151517 : 0x262628
+        return NSColor(srgbRed: CGFloat((value >> 16) & 255) / 255, green: CGFloat((value >> 8) & 255) / 255, blue: CGFloat(value & 255) / 255, alpha: 1)
+    }
     static let surface = color(0xF6F6F6, dark: 0x2B2B2E, matrix: 0x02140A, alpha: 0.82)
     static let input = color(0xF4F4F4, dark: 0x29292C, matrix: 0x03120A)
     static let hover = color(0xE9E9E9, dark: 0x333336, matrix: 0x0A2E14)
@@ -16,6 +23,9 @@ enum FeedPalette {
     static let blue = color(0x215EBB, dark: 0x92B7FF, matrix: 0x6BFFE4)
     static let outgoingMessage = color(0x1769D2, dark: 0x1764C0, matrix: 0x0B4D22)
     static let incomingMessage = color(0xEEEEF0, dark: 0x303034, matrix: 0x041C0D)
+    /// Your prompts in the activity stream: a light tint of the outgoing blue,
+    /// so they read apart from gray command and output cards.
+    static let userMessage = color(0xE7F0FD, dark: 0x1C2A40, matrix: 0x041C0D)
     static let green = color(0x1F734C, dark: 0x88C8A3, matrix: 0x00FF41)
     static let orange = color(0xA05B13, dark: 0xE8B36F, matrix: 0xC8FF5C)
     static let red = color(0xBB3443, dark: 0xFF98A3, matrix: 0xFF5A4E)

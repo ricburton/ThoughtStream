@@ -31,6 +31,10 @@ final class Session {
     var forkSource: String?
     private var claude: ClaudeConnection?
     private var claudeSettings: InferenceSettings?
+    private var local: LocalModelConnection?
+    /// Finds and starts local runtimes. Replaced in tests.
+    var localModels = LocalModelRegistry.shared
+    var makeLocalConnection: () -> LocalModelConnection = { LocalModelConnection() }
     var title: String
     var sidebarSummary: String?
     var sidebarSummaryFingerprint: String?
@@ -84,22 +88,43 @@ final class Session {
     private var streamed: [String: String] = [:]
     private var finalResponse: StreamRecord?
     private var requests = Set<String>()
-    private var feed = FeedBuffer()
-    var history: [StreamRecord] { outbox.decorate(feed.records) }
+    private var residentFeed = FeedBuffer()
+    private(set) var isHistoryLoaded = false
+    private var restoredLocalHistory = false
+    private var savedLastActivity: Date?
+    private var savedConversationActivity: Date?
+    private(set) var lastHistoryAccess = Date()
+    private var lastRuntimeActivity = Date()
+    // Yield the buffer in place: streaming must not copy the entire transcript.
+    private var feed: FeedBuffer {
+        _read { loadLocalHistory(); yield residentFeed }
+        _modify { loadLocalHistory(); yield &residentFeed }
+    }
+    var history: [StreamRecord] { lastHistoryAccess = Date(); return outbox.decorate(feed.records) }
     /// Undecorated, so sorting chats doesn't rebuild every transcript.
-    var lastActivity: Date? { feed.records.last?.time }
+    var lastActivity: Date? { isHistoryLoaded ? residentFeed.records.last?.time : savedLastActivity }
     /// Startup and connection bookkeeping should not make an old chat look new.
     var lastConversationActivity: Date? {
-        feed.records.last { $0.kind == StreamKind.user.rawValue || $0.kind == StreamKind.prose.rawValue }?.time
+        isHistoryLoaded ? residentFeed.records.last { $0.kind == StreamKind.user.rawValue || $0.kind == StreamKind.prose.rawValue }?.time : savedConversationActivity
     }
     let outbox: MessageOutbox
     var queueWorker: Task<Void, Never>?
     var queueRetry: Task<Void, Never>?
     var queueConnection: (() async throws -> Void)?
     var queueNetworkObserver: NSObjectProtocol?
-    var queueRetryDelay: UInt64 = 2
+    /// Consecutive unsuccessful pushes; sets the delay before the next one.
+    var queueAttempt = 0
+    /// The queued message that opened the running turn. If that turn fails on
+    /// the connection before any model output, the message is sent again.
+    var resendCandidate: QueuedChat?
+    var turnHadActivity = false
+    /// The last "still waiting" status shown, so a waiting queue does not
+    /// refresh the whole window on every poke at the link.
+    var queueWaitStatus: String?
+    private var queueJournalChecked = Set<UUID>()
     var queueConnectivity = ConnectivityMonitor.shared
-    private(set) var protocolEvents: [[String: Any]] = []
+    /// Diagnostic compatibility accessor; the complete log lives only on disk.
+    var protocolEvents: [[String: Any]] { protocolSnapshot() }
     private let folder: URL
     private let historyStore: ConversationStore
     /// One serial queue for every session: reopening a folder drains any
@@ -114,7 +139,7 @@ final class Session {
     private var turnRevision = 0
     private var connectionGeneration = UUID()
 
-    init(project: URL, id: UUID = UUID(), title: String = "New chat", thread: String? = nil, storageRoot: URL? = nil, needsHistory: Bool = false, provider: AgentProvider = .codex, forkSource: String? = nil, turnWasInterrupted: Bool = false) {
+    init(project: URL, id: UUID = UUID(), title: String = "New chat", thread: String? = nil, storageRoot: URL? = nil, needsHistory: Bool = false, provider: AgentProvider = .codex, forkSource: String? = nil, turnWasInterrupted: Bool = false, deferHistory: Bool = false, restoredMetadata: Data? = nil) {
         self.project = project; self.id = id; self.title = title; self.thread = thread
         self.turnWasInterrupted = turnWasInterrupted
         self.provider = provider; self.forkSource = forkSource
@@ -123,10 +148,10 @@ final class Session {
         historyStore = ConversationStore(folder: folder)
         outbox = MessageOutbox(url: folder.appendingPathComponent("outbox.json"))
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let store = historyStore, protocolURL = folder.appendingPathComponent("protocol.jsonl")
-        let loaded = persistence.sync { store.load() }
-        if let metadata = persistence.sync(execute: { ConversationStore.metadata(in: folder) }),
+        if let metadata = restoredMetadata ?? persistence.sync(execute: { ConversationStore.metadata(in: folder, includingActivity: true) }),
            let json = try? JSONSerialization.jsonObject(with: metadata) as? [String: Any] {
+            savedLastActivity = (json["lastActivity"] as? Double).map(Date.init(timeIntervalSince1970:))
+            savedConversationActivity = (json["lastConversationActivity"] as? Double).map(Date.init(timeIntervalSince1970:))
             sidebarSummary = (json["sidebarSummary"] as? String).flatMap(ChatThreadSummary.clean)
             if sidebarSummary != nil { sidebarSummaryFingerprint = json["sidebarSummaryFingerprint"] as? String }
             if let settings = json["inferenceSettings"] as? [String: Any],
@@ -137,6 +162,21 @@ final class Session {
         if storedInferenceSettings == nil, let message = outbox.messages.last {
             storedInferenceSettings = InferenceSettings(model: message.model, effort: message.effort, tier: message.tier)
         }
+        // Legacy metadata has no activity dates. Use a local timestamp until
+        // this chat is opened; never read its full transcript just to sort tabs.
+        if savedLastActivity == nil {
+            savedLastActivity = (try? folder.appendingPathComponent("history-v1.json").resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        }
+        if savedConversationActivity == nil, thread != nil { savedConversationActivity = savedLastActivity }
+        if !deferHistory || !outbox.messages.isEmpty { loadLocalHistory() }
+    }
+
+    func loadLocalHistory() {
+        guard !isHistoryLoaded else { return }
+        isHistoryLoaded = true
+        lastHistoryAccess = Date()
+        let store = historyStore, protocolURL = folder.appendingPathComponent("protocol.jsonl")
+        let loaded = persistence.sync { store.load() }
         let cancelled = (try? outbox.removeLegacyRestartPrompts()) ?? []
         feed = FeedBuffer(loaded.filter { record in
             !MessageOutbox.isLegacyRestartRecord(record) &&
@@ -145,9 +185,12 @@ final class Session {
         restoreQueuedRecords()
         // Only completed items are needed to restore outcomes. Skip parsing the
         // (much larger) stream of deltas for every saved chat at launch.
-        let completed = persistence.sync { Self.completedItemEvents(at: protocolURL) }
-        restoreFinalResponses(completed)
-        restoreCommandOutcomes(completed)
+        if !restoredLocalHistory {
+            let completed = persistence.sync { Self.completedItemEvents(at: protocolURL) }
+            restoreFinalResponses(completed)
+            restoreCommandOutcomes(completed)
+            restoredLocalHistory = true
+        }
         // A saved running event does not prove the process survived a crash.
         settleRunningCommands(as: .unknown)
         if store.needsCheckpoint || feed.records != loaded { save() }
@@ -156,8 +199,10 @@ final class Session {
     static var base: URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("UnfoldNative/Sessions", isDirectory: true) }
     static func restored() -> [Session] {
         ((try? FileManager.default.contentsOfDirectory(at: base, includingPropertiesForKeys: nil)) ?? []).compactMap { url in
-            guard let data = ConversationStore.metadata(in: url), let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], let raw = json["id"] as? String, let id = UUID(uuidString: raw), let project = json["project"] as? String else { return nil }
-            return Session(project: URL(fileURLWithPath: project), id: id, title: json["title"] as? String ?? "Session", thread: json["thread"] as? String, needsHistory: json["needsHistory"] as? Bool ?? false, provider: AgentProvider(rawValue: json["provider"] as? String ?? "") ?? .codex, forkSource: json["forkSource"] as? String, turnWasInterrupted: json["turnInFlight"] as? Bool ?? legacyTurnInFlight(in: url))
+            autoreleasepool { () -> Session? in
+            guard let data = ConversationStore.metadata(in: url, includingActivity: true), let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], let raw = json["id"] as? String, let id = UUID(uuidString: raw), let project = json["project"] as? String else { return nil }
+            return Session(project: URL(fileURLWithPath: project), id: id, title: json["title"] as? String ?? "Session", thread: json["thread"] as? String, needsHistory: json["needsHistory"] as? Bool ?? false, provider: AgentProvider(rawValue: json["provider"] as? String ?? "") ?? .codex, forkSource: json["forkSource"] as? String, turnWasInterrupted: json["turnInFlight"] as? Bool ?? legacyTurnInFlight(in: url), deferHistory: true, restoredMetadata: data)
+            }
         }.sorted { $0.lastActivity ?? .distantPast > $1.lastActivity ?? .distantPast }
     }
     /// Chats saved before the marker existed: a recent protocol log whose last
@@ -180,6 +225,46 @@ final class Session {
     }
     func attach(_ pane: StreamPane) { panes.removeAll { $0.value == nil }; panes.append(PaneReference(value: pane)); pane.projectDirectory = project; pane.replace(history) }
     func detach(_ pane: StreamPane) { panes.removeAll { $0.value == nil || $0.value === pane } }
+
+    /// Visible chats, work in flight, and queued messages always stay resident.
+    var canReleaseHistory: Bool {
+        panes.allSatisfy { $0.value == nil } && turn == nil && !turnWasInterrupted &&
+        !connecting && historyLoad == nil && queueWorker == nil && queueRetry == nil &&
+        reconnectTask == nil && !reconnectRequested && outbox.messages.isEmpty && requests.isEmpty
+    }
+
+    var residentHistoryBytes: Int {
+        guard isHistoryLoaded else { return 0 }
+        return residentFeed.records.reduce(0) { $0 + $1.text.utf8.count + 256 }
+    }
+
+    @discardableResult
+    func releaseHistory() -> Bool {
+        guard isHistoryLoaded, canReleaseHistory else { return false }
+        // A queued checkpoint owns its snapshot until it is durable. The journal
+        // already owns every mutation, so releasing this copy loses no history.
+        savedLastActivity = lastActivity
+        savedConversationActivity = lastConversationActivity
+        residentFeed = FeedBuffer()
+        streamed.removeAll(); finalResponse = nil
+        isHistoryLoaded = false
+        return true
+    }
+
+    /// Keep warm connections while switching tabs, but not indefinitely.
+    /// This never interrupts a running turn or an unresolved queued submission.
+    func suspendIdleRuntime(now: Date = Date()) {
+        guard canReleaseHistory, now.timeIntervalSince(max(lastRuntimeActivity, lastHistoryAccess)) >= 300,
+              client != nil || claude != nil || local != nil else { return }
+        intentionalStop = true
+        connectionGeneration = UUID()
+        let runtime = client; client = nil
+        runtime?.stop(terminateRuntime: true)
+        claude?.stop(); claude = nil; claudeSettings = nil
+        local?.stop(); local = nil
+        ready = false
+        flushProtocol()
+    }
     func restoreQueuedRecords() {
         let existing = Set(feed.records.compactMap(\.itemID))
         for message in outbox.messages {
@@ -187,6 +272,17 @@ final class Session {
                 feed.append(record, merging: false)
             }
         }
+    }
+
+    func wasQueuedSteerRejected(_ message: QueuedChat) async -> Bool {
+        guard provider == .codex, message.state == .uncertain, (message.attempts ?? 1) == 1,
+              let expectedTurn = message.expectedTurn, let thread,
+              queueJournalChecked.insert(message.id).inserted else { return false }
+        let url = folder.appendingPathComponent("protocol.jsonl")
+        return await Task.detached(priority: .utility) {
+            QueueSubmissionJournal.rejectedSteer(in: url, thread: thread, expectedTurn: expectedTurn,
+                                                text: message.text, imagePaths: message.attachments.map(\.path), createdAt: message.createdAt)
+        }.value
     }
     func refreshQueuePresentation() {
         panes.forEach { $0.value?.updateQueuePresentation(outbox, records: feed.records) }
@@ -201,6 +297,17 @@ final class Session {
         try historyStore.append(.init(replacement: records))
         try outbox.removeDelivered()
     }
+    /// Remove a withdrawn message's bubble (and its attachments) from the feed.
+    func removeQueuedRecords(_ message: QueuedChat) {
+        let prefix = message.itemID
+        let remaining = feed.records.filter { !($0.itemID == prefix || $0.itemID?.hasPrefix(prefix + ":") == true) }
+        guard remaining.count != feed.records.count else { refreshQueuePresentation(); return }
+        persistMutation(.init(replacement: remaining))
+        feed = FeedBuffer(remaining)
+        let decorated = history
+        panes.forEach { $0.value?.replace(decorated) }
+        save()
+    }
     func appendQueuedChat(_ message: QueuedChat) {
         if title == "New chat" { title = String((message.text.isEmpty ? message.attachments.first?.name ?? "Image chat" : message.text).prefix(50)) }
         for record in message.records {
@@ -213,6 +320,7 @@ final class Session {
     }
     func report(_ kind: StreamKind, _ text: String, language: String? = nil, item: String? = nil, delta: Bool = false, command: CommandActivity? = nil) {
         let record = StreamRecord(kind: kind.rawValue, text: text, language: language, itemID: item, command: command)
+        if turn != nil, [.prose, .reasoning, .command, .code, .output, .change, .tool].contains(kind) { turnHadActivity = true }
         persistMutation(.init(record: record, merging: delta))
         feed.append(record, merging: delta)
         panes.forEach { $0.value?.append(record, item: item, delta: delta) }
@@ -221,11 +329,18 @@ final class Session {
     private var saveScheduled = false
     private func scheduleSave() {
         guard !saveScheduled else { return }; saveScheduled = true
-        // The journal already holds every delta; checkpoints only bound replay.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.saveScheduled = false; self?.save() }
+        // Deltas are journaled immediately. A checkpoint every five seconds
+        // bounds recovery work without repeatedly encoding a long chat.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self else { return }
+            self.saveScheduled = false
+            if self.isHistoryLoaded { self.save() }
+        }
     }
     func save() {
         var meta: [String: Any] = ["id": id.uuidString, "project": project.path, "title": title, "thread": thread as Any? ?? NSNull(), "needsHistory": needsHistory, "provider": provider.rawValue, "forkSource": forkSource as Any? ?? NSNull(), "turnInFlight": turn != nil || turnWasInterrupted]
+        meta["lastActivity"] = lastActivity?.timeIntervalSince1970
+        meta["lastConversationActivity"] = lastConversationActivity?.timeIntervalSince1970
         meta["sidebarSummary"] = sidebarSummary
         meta["sidebarSummaryFingerprint"] = sidebarSummaryFingerprint
         if let settings = storedInferenceSettings {
@@ -233,18 +348,26 @@ final class Session {
         }
         do {
             let metadata = try JSONSerialization.data(withJSONObject: meta)
-            let records = history, store = historyStore
+            // Changing metadata or quitting must never hydrate a closed chat
+            // or checkpoint an empty buffer over its saved conversation.
+            guard isHistoryLoaded else {
+                try historyStore.append(.init(metadata: metadata), synchronize: false)
+                return
+            }
+            let records = outbox.decorate(residentFeed.records), store = historyStore
             // The checkpoint and journal must share one ordering: capture the
             // records and the journal offset together, so an older snapshot
             // cannot skip newer deltas. Encoding and writing happen off-main.
             let offset = try store.prepareCheckpoint(metadata: metadata, records: records)
-            persistence.async { [weak self] in
-                do { try store.writeCheckpoint(metadata: metadata, records: records, journalOffset: offset) }
-                catch { Self.reportPersistenceFailure(error, to: self) }
+            store.enqueueCheckpoint(metadata: metadata, records: records, journalOffset: offset, on: persistence) { [weak self] error in
+                Self.reportPersistenceFailure(error, to: self)
             }
         } catch { onStatus?("History could not be saved: \(error.localizedDescription)") }
     }
     private func persistMutation(_ change: ConversationStore.Mutation) {
+        // Hydrate before journaling: otherwise the initial replay would already
+        // contain this mutation and the caller would apply it a second time.
+        loadLocalHistory()
         // Written before the change is published, so an app crash cannot lose
         // it. Streaming deltas arrive many times per second; skip the per-line
         // fsync and leave flushing to the kernel.
@@ -258,7 +381,7 @@ final class Session {
     private func flushProtocol() {
         protocolFlushScheduled = false
         guard !pendingProtocol.isEmpty else { return }
-        let data = pendingProtocol; pendingProtocol.removeAll(keepingCapacity: true)
+        let data = pendingProtocol; pendingProtocol = Data()
         let url = folder.appendingPathComponent("protocol.jsonl")
         persistence.async {
             if !FileManager.default.fileExists(atPath: url.path) {
@@ -317,6 +440,7 @@ final class Session {
     func connect(_ executable: URL, persistentRuntime: Bool = true) async throws {
         if ready { return }
         if provider == .claude { try await connectClaude(executable); return }
+        if provider == .local { try await connectLocal(); return }
         guard !connecting else { throw CodexConnection.error("Codex is already connecting. Please try again when it is ready.") }
         connecting = true; intentionalStop = false
         let generation = connectionGeneration
@@ -376,6 +500,15 @@ final class Session {
         guard !connecting else { throw CodexConnection.error("Claude Code is already connecting.") }
         connecting = true; intentionalStop = false
         defer { connecting = false }
+        let settings = requestedSettings ?? inferenceSettings
+        var models: [[String: Any]] = []
+        if settings.tier == "fast" {
+            models = try await ProviderModelDiscovery.models(for: .claude, executable: executable)
+            onModels?(models)
+            guard InferenceSettings.supportsClaudeFastMode(settings.model, in: models) else {
+                throw CodexConnection.error("Fast mode isn’t advertised for \(settings.displayName). Choose Standard or another model, then retry.")
+            }
+        }
         do { try await loadClaudeHistory(refresh: true) }
         catch {
             if needsHistory && history.isEmpty { throw error }
@@ -395,19 +528,69 @@ final class Session {
                 self.onStatus?("Reconnecting…"); self.resumeConnection()
             }
         }
-        let settings = requestedSettings ?? inferenceSettings
         do {
-            try await runtime.start(executable: executable, project: project, settings: settings, resume: forkSource ?? thread, fork: forkSource != nil)
+            try await runtime.start(executable: executable, project: project, settings: settings, resume: forkSource ?? thread, fork: forkSource != nil, models: models)
             claudeSettings = settings; ready = true; onStatus?("Claude Code connected")
         } catch { claude = nil; runtime.stop(); throw error }
     }
+    /// A local model needs no executable, account or Internet: only a runtime
+    /// serving the chosen model. An installed runtime is started if needed.
+    func connectLocal() async throws {
+        if ready { return }
+        guard !connecting else { throw CodexConnection.error("The local model is already connecting.") }
+        connecting = true; intentionalStop = false
+        defer { connecting = false }
+        onStatus?("Finding local models…")
+        let model = try await resolveLocalModel(inferenceSettings.model)
+        _ = localConnection()
+        ready = true
+        onStatus?("\(model.name) ready on this Mac")
+    }
+    /// Pins a chat with no model yet to the one it will actually use.
+    private func resolveLocalModel(_ identifier: String) async throws -> LocalModel {
+        let model = try await localModels.resolve(identifier)
+        if storedInferenceSettings?.model != model.identifier {
+            var settings = inferenceSettings
+            settings.model = model.identifier; settings.tier = "default"
+            setInferenceSettings(settings)
+        }
+        return model
+    }
+    private func localConnection() -> LocalModelConnection {
+        if let local { return local }
+        let connection = makeLocalConnection()
+        connection.onEvent = { [weak self] in self?.receive($0) }
+        local = connection
+        return connection
+    }
+    private func sendLocal(_ prompt: String, attachments: [ChatAttachment], model: String?, queuedID: UUID?) async throws {
+        _ = try Self.messageInput(prompt, attachments: attachments)
+        guard turn == nil else { throw CodexConnection.error("The local model is still working. Stop it, or wait for it to finish.") }
+        let chosen = try await resolveLocalModel(model ?? inferenceSettings.model)
+        let connection = localConnection()
+        // After a relaunch, a fork, or a move from a cloud chat the model has
+        // no memory of this conversation. Messages still waiting are left out.
+        if !connection.hasContext { connection.seed(from: history) }
+        let images = try attachments.map { try Data(contentsOf: URL(fileURLWithPath: $0.path)) }
+        if let queuedID { try markQueueSubmitting(queuedID, baseline: nil) }
+        try connection.send(text: prompt, images: images, model: chosen, project: project, contextLength: localModels.contextLength)
+        ready = true
+        if title == "New chat" { title = String((prompt.isEmpty ? attachments.first?.name ?? "Image chat" : prompt).prefix(50)) }
+        if queuedID == nil {
+            if !prompt.isEmpty { report(.user, prompt) }
+            for attachment in attachments { report(.user, Self.pretty(["type": "local_image", "path": attachment.path, "name": attachment.name])) }
+        }
+        save()
+    }
     func isAuthenticated() async throws -> Bool {
+        if provider == .local { return true }
         if provider == .claude { return try await ClaudeConnection.isAuthenticated() }
         guard let client = client, ready else { return false }
         let result = try await client.request("account/read", ["refreshToken": false])
         return (result["account"] as? [String: Any])?["type"] as? String == "chatgpt"
     }
     func loginIfNeeded() async throws {
+        if provider == .local { onStatus?("Local models need no sign-in"); return }
         if provider == .claude {
             if try await isAuthenticated() { onStatus?("Claude Code connected"); return }
             throw CodexConnection.error("Sign in to Claude Code in Terminal with: claude auth login. Then return here and send again.")
@@ -434,6 +617,10 @@ final class Session {
     func send(_ prompt: String, attachments: [ChatAttachment] = [], model: String? = nil, effort: String? = nil, tier: String? = nil, queuedID: UUID? = nil) async throws {
         if provider == .claude {
             try await sendClaude(prompt, attachments: attachments, model: model, effort: effort, tier: tier, queuedID: queuedID)
+            return
+        }
+        if provider == .local {
+            try await sendLocal(prompt, attachments: attachments, model: model, queuedID: queuedID)
             return
         }
         guard let client = client, ready else { throw CodexConnection.error("Connect Codex first.") }
@@ -478,7 +665,11 @@ final class Session {
             params.merge(AccessMode.selected.turnParameters(project: project)) { _, value in value }
             params["summary"] = "auto"
             params.merge(settings.turnParameters) { _, value in value }
-            let result = try await client.request("turn/start", params); turn = (result["turn"] as? [String: Any])?["id"] as? String
+            let revision = turnRevision
+            let result = try await client.request("turn/start", params)
+            // A completion notification can arrive before the request reply.
+            // Never resurrect that finished turn from its delayed acknowledgement.
+            if revision == turnRevision { turn = (result["turn"] as? [String: Any])?["id"] as? String }
         }
     }
     private func sendClaude(_ prompt: String, attachments: [ChatAttachment], model: String?, effort: String?, tier: String?, queuedID: UUID? = nil) async throws {
@@ -509,6 +700,10 @@ final class Session {
         save()
     }
     func interrupt() async throws {
+        if provider == .local {
+            guard let local, turn != nil else { throw CodexConnection.error("No active turn.") }
+            local.interrupt(); return
+        }
         if provider == .claude {
             guard let claude, turn != nil else { throw CodexConnection.error("No active turn.") }
             try await claude.interrupt(); return
@@ -521,6 +716,10 @@ final class Session {
         if provider == .claude {
             guard let claude, ready else { throw CodexConnection.error("Claude Code is disconnected.") }
             try claude.respond(String(describing: id), result: result); resolveRequest(id); return
+        }
+        if provider == .local {
+            guard let local else { throw CodexConnection.error("The local model is no longer running this turn.") }
+            try local.respond(String(describing: id), result: result); resolveRequest(id); return
         }
         guard let client = client, ready else { throw CodexConnection.error("Codex is disconnected.") }
         try client.respond(id, result: result); resolveRequest(id); report(.system, "Response sent. The action is not yet confirmed complete.")
@@ -535,6 +734,14 @@ final class Session {
         pending.forEach { onRequestResolved?($0) }
     }
     func fork() async throws -> Session {
+        if provider == .local {
+            guard turn == nil else { throw CodexConnection.error("Finish or stop the local model's turn before forking.") }
+            // The fork rebuilds its context from this copied history on first send.
+            let session = Session(project: project, title: title + " · fork", provider: .local)
+            session.setInferenceSettings(inferenceSettings)
+            session.reconcileHistory(history)
+            return session
+        }
         if provider == .claude {
             guard let thread, turn == nil else { throw CodexConnection.error("Finish the active Claude turn before forking.") }
             let session = Session(project: project, title: title + " · fork", provider: .claude, forkSource: thread)
@@ -584,31 +791,37 @@ final class Session {
     func stop() {
         intentionalStop = true; connectionGeneration = UUID()
         turnWasInterrupted = turnWasInterrupted || turn != nil
-        stopMessageQueue(); historyLoad?.cancel(); save(); flushProtocol(); persistence.sync {}
+        stopMessageQueue(); historyLoad?.cancel(); if isHistoryLoaded { save() }; flushProtocol(); persistence.sync {}
         client?.stop(terminateRuntime: !turnWasInterrupted)
-        claude?.stop(); ready = false; turn = nil
+        claude?.stop(); local?.stop(); ready = false; turn = nil
     }
     func disconnectForAccessChange(to mode: AccessMode) {
         connectionGeneration = UUID(); turnWasInterrupted = false
         reconnectRequested = false; reconnectTask?.cancel(); reconnectTask = nil
         let runtime = client; client = nil; ready = false; turn = nil
-        runtime?.stop(terminateRuntime: true); claude?.stop(); claude = nil; resolveAllRequests()
+        runtime?.stop(terminateRuntime: true); claude?.stop(); claude = nil; local?.stop(); resolveAllRequests()
         settleRunningCommands(as: .interrupted)
         report(.system, "Access changed to \(mode.label). The \(provider.label) runtime was stopped. Existing file changes and independent background processes are not undone.")
         onStatus?(mode.label + " · disconnected")
     }
 
     func receive(_ original: [String: Any]) {
-        let event = Self.redact(original) as? [String: Any] ?? [:]; protocolEvents.append(event)
+        lastRuntimeActivity = Date()
+        let event = Self.redact(original) as? [String: Any] ?? [:]
         if let data = try? JSONSerialization.data(withJSONObject: event, options: .sortedKeys) {
             pendingProtocol.append(data); pendingProtocol.append(10)
-            if !protocolFlushScheduled {
+            if pendingProtocol.count >= 256 * 1024 { flushProtocol() }
+            if !pendingProtocol.isEmpty && !protocolFlushScheduled {
                 protocolFlushScheduled = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.flushProtocol() }
             }
         }
         guard event["_direction"] as? String != "outgoing" else { return }
         let method = event["method"] as? String ?? "", p = event["params"] as? [String: Any] ?? [:]
+        // The runtime also streams child agents. Their lifecycle must never
+        // replace or finish this chat's turn, which queued input steers.
+        if ["turn/started", "turn/completed"].contains(method),
+           let eventThread = p["threadId"] as? String, let thread, eventThread != thread { return }
         if let id = event["id"], !method.isEmpty { requests.insert(String(describing: id)); onStatus?("Input required"); onRequest?(id, method, p); return }
         switch method {
         case "item/reasoning/summaryTextDelta": delta(.reasoning, p)
@@ -640,6 +853,7 @@ final class Session {
         case "turn/diff/updated": report(.change, p["diff"] as? String ?? Self.pretty(p), language: "diff")
         case "turn/started":
             turnRevision += 1; turnWasInterrupted = false
+            turnHadActivity = false
             finalResponse = nil; streamed.removeAll(); turn = (p["turn"] as? [String: Any])?["id"] as? String; onStatus?("Agent is working")
             // Record the running turn now, so a quit or crash can resume it.
             save()
@@ -649,8 +863,13 @@ final class Session {
             settleRunningCommands(as: .unknown)
             let turnData = p["turn"] as? [String: Any] ?? [:]
             let status = turnData["status"] as? String ?? "unknown"
-            onStatus?(status == "completed" ? "Ready" : "Turn \(status)")
-            if let error = turnData["error"] as? [String: Any] { report(.error, error["message"] as? String ?? Self.pretty(error)) }
+            let errorText = (turnData["error"] as? [String: Any]).map { $0["message"] as? String ?? Self.pretty($0) }
+            // A turn the connection killed before any reply is pushed again.
+            let retried = retryDroppedTurn(status: status, error: errorText)
+            onStatus?(status == "completed" ? "Ready" : retried != nil ? "Connection dropped · resending" : "Turn \(status)")
+            // Say why once; later attempts only update the queued bubble.
+            if let errorText, retried != false { report(.error, errorText) }
+            if retried == true { report(.system, "The connection dropped before a reply. ThoughtStream will keep resending this message until it goes through.") }
             if status == "completed" {
                 if let items = turnData["items"] as? [[String: Any]],
                    let final = items.last(where: { $0["type"] as? String == "agentMessage" && $0["phase"] as? String == "final_answer" }),
@@ -662,9 +881,10 @@ final class Session {
                     feed.finalizeResponse(finalResponse)
                     panes.forEach { $0.value?.finalizeResponse(finalResponse) }
                 }
-            } else { report(.system, "Turn \(status).") }
+            } else if retried == nil { report(.system, "Turn \(status).") }
             finalResponse = nil; save(); flushProtocol()
-            resumeMessageQueue()
+            // A resend is paced by its own timer rather than fired at once.
+            if retried == nil { resumeMessageQueue() }
         case "account/login/completed": report(.system, Self.pretty(p)); onStatus?((p["success"] as? Bool) == true ? "ChatGPT connected" : "Sign-in failed")
         case "serverRequest/resolved": if let id = p["requestId"] { resolveRequest(id) }
         case "runtime/stderr": report(.system, p["text"] as? String ?? "")
@@ -685,16 +905,29 @@ final class Session {
     private nonisolated static func completedItemEvents(at url: URL) -> [[String: Any]] {
         guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return [] }
         let marker = Data("item/completed".utf8)
+        let escapedMarker = Data("item\\/completed".utf8)
+        let answer = Data("\"agentMessage\"".utf8), command = Data("\"commandExecution\"".utf8)
         return data.split(separator: 10).compactMap { line in
-            guard line.range(of: marker) != nil else { return nil }
-            return (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any]
+            guard line.range(of: marker) != nil || line.range(of: escapedMarker) != nil,
+                  line.range(of: answer) != nil || line.range(of: command) != nil else { return nil }
+            return autoreleasepool {
+                guard let event = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
+                      let params = event["params"] as? [String: Any], let item = params["item"] as? [String: Any],
+                      let type = item["type"] as? String, ["agentMessage", "commandExecution"].contains(type) else { return nil }
+                // Recovery needs final prose and command status, never tool
+                // images, aggregated output, or the full protocol envelope.
+                let keys = type == "agentMessage" ? ["id", "type", "phase", "text"] :
+                    ["id", "type", "command", "cwd", "exitCode", "durationMs", "status"]
+                let summary = item.filter { keys.contains($0.key) }
+                return ["method": "item/completed", "params": ["item": summary]]
+            }
         }
     }
     /// The full protocol log, read from disk on demand rather than kept for every chat.
     func protocolSnapshot() -> [[String: Any]] {
         flushProtocol()
         let url = folder.appendingPathComponent("protocol.jsonl")
-        guard let data = persistence.sync(execute: { try? Data(contentsOf: url) }) else { return protocolEvents }
+        guard let data = persistence.sync(execute: { try? Data(contentsOf: url) }) else { return [] }
         return data.split(separator: 10).compactMap { (try? JSONSerialization.jsonObject(with: Data($0))) as? [String: Any] }
     }
     private func restoreFinalResponses(_ events: [[String: Any]]) {

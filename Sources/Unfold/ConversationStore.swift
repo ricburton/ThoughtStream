@@ -19,19 +19,38 @@ final class ConversationStore: @unchecked Sendable {
         var metadata: Data?
     }
     private struct Header: Decodable { let metadata: Data; let journalOffset: Int }
+    private struct RecordActivity: Decodable { let kind: String; let time: Date }
+    private struct ActivityHeader: Decodable { let records: [RecordActivity] }
+    private struct CatalogStamp: Codable, Equatable {
+        let size: Int?
+        let modified: Date?
+        let created: Date?
+    }
+    private struct Catalog: Codable {
+        let stamps: [CatalogStamp]
+        let metadata: Data
+    }
     private let folder: URL
     /// True after `load` when replay needed the legacy feed or journal tail.
     private(set) var needsCheckpoint = true
     /// Set by `prepareCheckpoint` on the caller's thread.
     private var hasBaseline = false
     // Only touched by `writeCheckpoint`, on the persistence queue.
-    private var lastCheckpoint: Data?
+    private var lastCheckpointStamp: CatalogStamp?
+    private let checkpointLock = NSLock()
+    private var pendingCheckpoint: Snapshot?
+    private var checkpointScheduled = false
     private var legacyWritable: (metadata: Bool, feed: Bool)?
     private var journal: URL { folder.appendingPathComponent("history-journal.jsonl") }
     private var checkpoint: URL { folder.appendingPathComponent("history-v1.json") }
     private var backup: URL { folder.appendingPathComponent("history-v1.backup.json") }
 
     init(folder: URL) { self.folder = folder }
+
+    private static func stamp(_ url: URL) -> CatalogStamp {
+        let value = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .creationDateKey])
+        return CatalogStamp(size: value?.fileSize, modified: value?.contentModificationDate, created: value?.creationDate)
+    }
 
     static func snapshot(in folder: URL) -> Snapshot? {
         for name in ["history-v1.json", "history-v1.backup.json"] {
@@ -41,22 +60,73 @@ final class ConversationStore: @unchecked Sendable {
         return nil
     }
 
-    static func metadata(in folder: URL) -> Data? {
+    static func metadata(in folder: URL, includingActivity: Bool = false) -> Data? {
+        // A disposable index avoids parsing every large checkpoint at launch.
+        // Any change to an authoritative file invalidates it, including a torn
+        // checkpoint or journal-only recovery. It never replaces those files.
+        let names = ["history-v1.json", "history-v1.backup.json", "history-journal.jsonl", "session.json"]
+        func stamps() -> [CatalogStamp] {
+            names.map { stamp(folder.appendingPathComponent($0)) }
+        }
+        let before = stamps()
+        let catalogURL = folder.appendingPathComponent(includingActivity ? "history-sidebar-v1.json" : "history-catalog-v1.json")
+        if let data = try? Data(contentsOf: catalogURL),
+           let cached = try? JSONDecoder().decode(Catalog.self, from: data), cached.stamps == before {
+            return cached.metadata
+        }
         // Launch lists every saved chat; skip decoding each one's records.
         var header: Header?
+        var lastActivity: Date?, lastConversationActivity: Date?
         for name in ["history-v1.json", "history-v1.backup.json"] where header == nil {
-            if let data = try? Data(contentsOf: folder.appendingPathComponent(name)) { header = try? JSONDecoder().decode(Header.self, from: data) }
+            if let data = try? Data(contentsOf: folder.appendingPathComponent(name), options: .mappedIfSafe) {
+                header = try? JSONDecoder().decode(Header.self, from: data)
+                if includingActivity, let header,
+                   let meta = (try? JSONSerialization.jsonObject(with: header.metadata)) as? [String: Any] {
+                    lastActivity = (meta["lastActivity"] as? Double).map(Date.init(timeIntervalSince1970:))
+                    lastConversationActivity = (meta["lastConversationActivity"] as? Double).map(Date.init(timeIntervalSince1970:))
+                    if lastActivity == nil, let activity = try? JSONDecoder().decode(ActivityHeader.self, from: data) {
+                        // One-time migration of old sidebar dates. Skip text,
+                        // tool payloads, and all the other transcript fields.
+                        lastActivity = activity.records.last?.time
+                        lastConversationActivity = activity.records.last { ["You", "Agent"].contains($0.kind) }?.time
+                    }
+                }
+            }
         }
         let snapshot = header
         var metadata = snapshot?.metadata ?? (try? Data(contentsOf: folder.appendingPathComponent("session.json")))
         for line in journalTail(in: folder, after: snapshot?.journalOffset ?? 0).split(separator: 10) {
-            if let change = try? JSONDecoder().decode(Mutation.self, from: Data(line)), let value = change.metadata { metadata = value }
+            if let change = try? JSONDecoder().decode(Mutation.self, from: Data(line)) {
+                if let value = change.metadata { metadata = value }
+                if includingActivity {
+                    if let replacement = change.replacement {
+                        lastActivity = replacement.last?.time
+                        lastConversationActivity = replacement.last { ["You", "Agent"].contains($0.kind) }?.time
+                    }
+                    if let record = change.record ?? change.final {
+                        lastActivity = record.time
+                        if ["You", "Agent"].contains(record.kind) { lastConversationActivity = record.time }
+                    }
+                }
+            }
+        }
+        if includingActivity, let value = metadata,
+           var meta = (try? JSONSerialization.jsonObject(with: value)) as? [String: Any] {
+            if let lastActivity { meta["lastActivity"] = lastActivity.timeIntervalSince1970 }
+            if let lastConversationActivity { meta["lastConversationActivity"] = lastConversationActivity.timeIntervalSince1970 }
+            metadata = (try? JSONSerialization.data(withJSONObject: meta)) ?? value
+        }
+        // Do not stamp a mixed read if another writer changed the files.
+        if let metadata, before == stamps(),
+           let data = try? JSONEncoder().encode(Catalog(stamps: before, metadata: metadata)) {
+            try? data.write(to: catalogURL, options: .atomic)
         }
         return metadata
     }
 
     func load() -> [StreamRecord] {
         let snapshot = Self.snapshot(in: folder)
+        hasBaseline = snapshot != nil
         let initial = snapshot?.records ?? (try? Data(contentsOf: folder.appendingPathComponent("feed.json")))
             .flatMap { try? JSONDecoder().decode([StreamRecord].self, from: $0) } ?? []
         var feed = FeedBuffer(initial)
@@ -114,6 +184,34 @@ final class ConversationStore: @unchecked Sendable {
         try writeCheckpoint(metadata: metadata, records: records, journalOffset: offset)
     }
 
+    /// Keep at most the in-flight snapshot and the newest waiting snapshot.
+    /// Intermediate saves are already recoverable from the append-only journal.
+    func enqueueCheckpoint(metadata: Data, records: [StreamRecord], journalOffset: Int,
+                           on queue: DispatchQueue, onError: @escaping (Error) -> Void) {
+        checkpointLock.lock()
+        pendingCheckpoint = Snapshot(metadata: metadata, records: records, journalOffset: journalOffset)
+        let schedule = !checkpointScheduled
+        checkpointScheduled = true
+        checkpointLock.unlock()
+        guard schedule else { return }
+        queue.async {
+            while true {
+                self.checkpointLock.lock()
+                let snapshot = self.pendingCheckpoint
+                self.pendingCheckpoint = nil
+                if snapshot == nil { self.checkpointScheduled = false }
+                self.checkpointLock.unlock()
+                guard let snapshot else { return }
+                autoreleasepool {
+                    do {
+                        try self.writeCheckpoint(metadata: snapshot.metadata, records: snapshot.records,
+                                                 journalOffset: snapshot.journalOffset)
+                    } catch { onError(error) }
+                }
+            }
+        }
+    }
+
     /// Journals the checkpoint's metadata and returns the offset it covers.
     /// Call in the same order as `append`, at the moment `records` was captured.
     func prepareCheckpoint(metadata: Data, records: [StreamRecord]) throws -> Int {
@@ -133,14 +231,13 @@ final class ConversationStore: @unchecked Sendable {
         let data = try JSONEncoder().encode(Snapshot(metadata: metadata, records: records, journalOffset: offset))
         // Never replace a usable backup with a damaged primary. A primary this
         // store wrote is known to be readable, so it needn't be decoded again.
-        if let lastCheckpoint {
-            try lastCheckpoint.write(to: backup, options: .atomic)
-        } else if let old = try? Data(contentsOf: checkpoint) {
-            if (try? JSONDecoder().decode(Snapshot.self, from: old)) != nil { try old.write(to: backup, options: .atomic) }
+        if let old = try? Data(contentsOf: checkpoint, options: .mappedIfSafe) {
+            let unchanged = lastCheckpointStamp.map { $0 == Self.stamp(checkpoint) } ?? false
+            if unchanged || (try? JSONDecoder().decode(Snapshot.self, from: old)) != nil { try old.write(to: backup, options: .atomic) }
             else { try old.write(to: folder.appendingPathComponent("history-v1.unreadable-" + UUID().uuidString + ".json"), options: .atomic) }
         }
         try data.write(to: checkpoint, options: .atomic)
-        lastCheckpoint = data; needsCheckpoint = false
+        lastCheckpointStamp = Self.stamp(checkpoint); needsCheckpoint = false
         // Keep compatibility files, but only after the authoritative paired
         // snapshot commits. Their mismatch can no longer lose a conversation.
         let metaURL = folder.appendingPathComponent("session.json"), feedURL = folder.appendingPathComponent("feed.json")

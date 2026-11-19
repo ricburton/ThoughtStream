@@ -78,8 +78,14 @@ final class StreamingPresentationTests: XCTestCase {
         let table = try XCTUnwrap(descendants(pane.view).compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel() == "Native conversation and live activity" })
         let scroll = try XCTUnwrap(table.enclosingScrollView as? NativeFeedScrollView)
         scroll.onScrollUp?()
-        scroll.contentView.scroll(to: NSPoint(x: 0, y: 450))
         let row = try XCTUnwrap(table.view(atColumn: 0, row: 0, makeIfNecessary: true))
+        // Long code opens collapsed; the reader expands it and keeps reading as it streams.
+        let card = try XCTUnwrap(descendants(row).compactMap { $0 as? NativeCodeView }.first)
+        XCTAssertTrue(card.isCollapsed)
+        card.setExpanded(true)
+        defer { CodeCollapse.setExpanded(false, key: CodeCollapse.key(source: card.source, label: "swift")) }
+        pane.view.layoutSubtreeIfNeeded()
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 450))
         let text = try XCTUnwrap(descendants(row).compactMap { $0 as? NativeFeedTextView }.first)
         let position = scroll.contentView.bounds.minY
         for index in 120..<124 {
@@ -90,6 +96,7 @@ final class StreamingPresentationTests: XCTestCase {
             XCTAssertEqual(scroll.contentView.bounds.minY, position, accuracy: 2)
         }
         XCTAssertTrue(text.string.contains("value123"))
+        XCTAssertFalse(card.isCollapsed, "An expanded block stays open while it streams")
         XCTAssertFalse(pane.viewState.follows)
     }
 }

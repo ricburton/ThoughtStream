@@ -30,6 +30,7 @@ final class OfflineWindowIndicator {
             content.addSubview(edge, positioned: .above, relativeTo: nil)
         }
         observe(.connectivityDidChange, object: monitor) { [weak self] in self?.refresh() }
+        observe(.connectivityQualityDidChange, object: monitor) { [weak self] in self?.refresh() }
         for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification,
                      NSWindow.didChangeScreenNotification, NSWindow.didBecomeKeyNotification,
                      NSWindow.didDeminiaturizeNotification, NSWindow.didEnterFullScreenNotification,
@@ -53,10 +54,27 @@ final class OfflineWindowIndicator {
         observers.append((center, token))
     }
 
+    /// What the pill says: an outage with its retry count, or a working but
+    /// weak link with its measured data rate. Nothing when the link is healthy.
+    static func message(state: ConnectivityState, quality: LinkQuality, failedChecks: Int) -> (text: String, tone: OfflinePillView.Tone)? {
+        if state == .offline {
+            return (failedChecks > 3 ? "Offline · retry \(failedChecks)" : "Offline Mode", .offline)
+        }
+        guard state == .online, quality.isDegraded else { return nil }
+        let title = quality.grade == .crawling ? "Very slow connection" : "Slow connection"
+        return (quality.summary.map { "\(title) · \($0)" } ?? title, .slow)
+    }
+
     private func refresh() {
         edge.isHidden = !monitor.isOffline
-        guard monitor.isOffline, let window, window.isVisible, !window.isMiniaturized,
+        guard let message = Self.message(state: monitor.state, quality: monitor.quality, failedChecks: monitor.failedChecks),
+              let window, window.isVisible, !window.isMiniaturized,
               NSApplication.shared.isActive, let screen = window.screen else { hidePanel(); return }
+        if let pill = panel.contentView as? OfflinePillView {
+            pill.show(message.text, tone: message.tone)
+            let size = NSSize(width: pill.preferredWidth, height: panel.frame.height)
+            if panel.frame.size != size { panel.setContentSize(size) }
+        }
         let frame = Self.pillFrame(window: window.frame, screen: screen.frame,
                                    safeTop: screen.safeAreaInsets.top, size: panel.frame.size)
         if panel.parent == nil { window.addChildWindow(panel, ordered: .above) }
@@ -110,8 +128,26 @@ final class OfflineEdgeView: NSView {
 
 @MainActor
 final class OfflinePillView: NSView {
+    enum Tone { case offline, slow }
     private let label = NSTextField(labelWithString: "Offline Mode")
     private let icon = NSImageView()
+    private(set) var tone = Tone.offline
+
+    /// Wide enough for the current text, never narrower than the plain label.
+    var preferredWidth: CGFloat { max(150, ceil(label.intrinsicContentSize.width) + 56) }
+
+    func show(_ text: String, tone: Tone) {
+        guard text != label.stringValue || tone != self.tone else { return }
+        self.tone = tone
+        label.stringValue = text
+        icon.image = NSImage(systemSymbolName: tone == .offline ? "wifi.slash" : "wifi.exclamationmark", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold))
+        setAccessibilityLabel(text)
+        setAccessibilityHelp(tone == .offline
+            ? "Internet connectivity could not be verified. ThoughtStream keeps retrying every few seconds and sends queued chats as soon as it returns."
+            : "The connection works but is slow. Queued chats keep retrying until they go through.")
+        needsDisplay = true
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -145,8 +181,11 @@ final class OfflinePillView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func draw(_ dirtyRect: NSRect) {
         let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let fill = dark ? NSColor(srgbRed: 0.30, green: 0.17, blue: 0.04, alpha: 1)
-                        : NSColor(srgbRed: 1, green: 0.88, blue: 0.70, alpha: 1)
+        let fill: NSColor
+        switch tone {
+        case .offline: fill = dark ? NSColor(srgbRed: 0.30, green: 0.17, blue: 0.04, alpha: 1) : NSColor(srgbRed: 1, green: 0.88, blue: 0.70, alpha: 1)
+        case .slow: fill = dark ? NSColor(srgbRed: 0.27, green: 0.22, blue: 0.05, alpha: 1) : NSColor(srgbRed: 1, green: 0.94, blue: 0.72, alpha: 1)
+        }
         let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 6), xRadius: 15, yRadius: 15)
         let shadow = NSShadow(); shadow.shadowColor = .black.withAlphaComponent(0.12)
         shadow.shadowBlurRadius = 4; shadow.shadowOffset = NSSize(width: 0, height: -1)

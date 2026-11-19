@@ -39,13 +39,10 @@ final class WorkspaceStateTests: XCTestCase {
             workspace.splitPane(size.width > 1000 ? second : panes[0], side: .right)
             window.contentView?.layoutSubtreeIfNeeded()
             let thirds = columns(workspace)
-            if size.width == 860 {
-                // Two panes fit here, but a third would violate their minimum width.
-                XCTAssertEqual(thirds.count, 2)
-                workspace.singlePane(nil)
-                continue
-            }
+            // Even the smallest window takes a third pane: panes compact
+            // rather than refusing the split or growing the window.
             XCTAssertEqual(thirds.count, 3)
+            if size.width == 860 { XCTAssertTrue(thirds.allSatisfy { $0.density.hasCompactChrome }) }
             guard thirds.count == 3 else { continue }
             createdSessions.append(contentsOf: thirds.compactMap { $0.session?.id }.filter { $0 != session.id && !createdSessions.contains($0) })
             XCTAssertEqual(thirds[0].view.frame.width, thirds[1].view.frame.width, accuracy: 1)

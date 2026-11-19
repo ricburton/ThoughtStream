@@ -95,6 +95,105 @@ final class ModelCatalogTests: XCTestCase {
         XCTAssertTrue(arguments.contains("{\"disableAllHooks\":true}"))
     }
 
+    func testClaudeAliasesResolveToVersionedModelsAndUseAdvertisedFastSupport() throws {
+        let records = ClaudeConnection.modelRecords([
+            ["value": "future", "resolvedModel": "claude-future-12", "displayName": "Future Claude", "supportsFastMode": true, "supportedEffortLevels": ["high"]],
+            ["value": "opus", "resolvedModel": "claude-opus-5-5", "supportsFastMode": false],
+            ["value": "default", "resolvedModel": "claude-fable-5-1"]
+        ])
+        XCTAssertEqual(records.compactMap { $0["model"] as? String }, ["claude-future-12", "claude-opus-5-5", "default"])
+        XCTAssertTrue(InferenceSettings.supportsClaudeFastMode("claude-future-12", in: records))
+        XCTAssertTrue(InferenceSettings.supportsClaudeFastMode("future", in: records))
+        XCTAssertFalse(InferenceSettings.supportsClaudeFastMode("opus", in: records), "Explicit capability metadata overrides a historical fallback")
+        let settings = InferenceSettings(model: "claude-future-12", effort: "high", tier: "fast")
+        XCTAssertTrue(ClaudeConnection.arguments(settings: settings, mode: .workspace, resume: nil, fork: false, models: records).contains("{\"fastMode\":true}"))
+        let suite = "ModelFastTests-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        settings.save(to: defaults, provider: .claude)
+        XCTAssertEqual(InferenceSettings.load(from: defaults, provider: .claude), settings)
+    }
+
+    func testClaudeConnectionChecksDynamicFastCapabilityBeforeStartingSession() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for supported in [true, false] {
+            let executable = root.appendingPathComponent("claude-\(supported).py")
+            let log = root.appendingPathComponent("arguments-\(supported).jsonl")
+            let script = """
+            #!/usr/bin/env python3
+            import json, sys
+            with open(\(String(reflecting: log.path)), 'a') as output:
+                output.write(json.dumps(sys.argv[1:]) + '\\n')
+            for line in sys.stdin:
+                request = json.loads(line)
+                if request.get('type') == 'control_request':
+                    models = [{'value': 'future', 'resolvedModel': 'claude-future-12', 'supportsFastMode': \(supported ? "True" : "False")}]
+                    response = {'type': 'control_response', 'response': {'subtype': 'success', 'request_id': request['request_id'], 'response': {'models': models}}}
+                    print(json.dumps(response), flush=True)
+            """
+            try script.write(to: executable, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+            let session = Session(project: root, storageRoot: root, provider: .claude)
+            defer { session.stop() }
+            let settings = InferenceSettings(model: "claude-future-12", effort: "high", tier: "fast")
+            session.setInferenceSettings(settings)
+            do {
+                try await session.connect(executable)
+                XCTAssertTrue(supported, "Unsupported Fast must fail before starting a normal session")
+                XCTAssertTrue(session.ready)
+            } catch {
+                XCTAssertFalse(supported, error.localizedDescription)
+                XCTAssertFalse(session.ready)
+            }
+            let launches = try String(contentsOf: log).split(separator: "\n").map {
+                try XCTUnwrap(try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String])
+            }
+            XCTAssertEqual(launches.count, supported ? 2 : 1)
+            XCTAssertTrue(try XCTUnwrap(launches.first).contains("--no-session-persistence"))
+            if supported { XCTAssertTrue(try XCTUnwrap(launches.last).contains("{\"fastMode\":true}")) }
+            XCTAssertEqual(session.inferenceSettings, settings)
+        }
+    }
+
+    func testRefreshPreservesEffortWhileExplicitModelChangesUseAdvertisedDefault() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = Session(project: root, storageRoot: root, provider: .claude)
+        let saved = InferenceSettings(model: "claude-original", effort: "max", tier: "default")
+        session.setInferenceSettings(saved)
+        let original = InferenceSettings.load(provider: .claude)
+        defer { original.save(provider: .claude) }
+        let workspace = WorkspaceWindow(restoredSessions: [session], stateStore: WorkspaceStateStore(url: root.appendingPathComponent("workspace.json")), modelCatalog: ModelCatalog(defaults: nil))
+        defer { workspace.stopAll(); workspace.window?.close() }
+        let catalog: [[String: Any]] = [
+            ["model": saved.model, "supportedReasoningEfforts": [["reasoningEffort": "low"]]],
+            ["model": "claude-next", "supportsFastMode": true, "defaultReasoningEffort": "high", "supportedReasoningEfforts": [["reasoningEffort": "low"], ["reasoningEffort": "high"]]],
+            ["model": "claude-added", "defaultReasoningEffort": "medium", "supportedReasoningEfforts": [["reasoningEffort": "low"], ["reasoningEffort": "medium"]]]
+        ]
+        workspace.applyModelList(catalog)
+        XCTAssertEqual(workspace.chosenSettings, saved, "Background discovery must not silently change the next message's effort")
+        XCTAssertEqual(session.inferenceSettings, saved)
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let picker = try XCTUnwrap(descendants(try XCTUnwrap(workspace.window?.contentView)).compactMap { $0 as? NSPopUpButton }.first { $0.accessibilityLabel() == "Model" })
+        picker.select(try XCTUnwrap(picker.itemArray.first { $0.representedObject as? String == "claude-next" }))
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(picker.action), to: picker.target, from: picker))
+        XCTAssertEqual(workspace.chosenSettings.effort, "high")
+        XCTAssertEqual(session.inferenceSettings, workspace.chosenSettings)
+        let speed = try XCTUnwrap(descendants(try XCTUnwrap(workspace.window?.contentView)).compactMap { $0 as? NSPopUpButton }.first { $0.accessibilityLabel() == "Speed" })
+        let fast = try XCTUnwrap(speed.itemArray.first { $0.representedObject as? String == "fast" })
+        XCTAssertTrue(fast.isEnabled, "New Claude models use discovered Fast support without a name allowlist")
+        speed.select(fast)
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(speed.action), to: speed.target, from: speed))
+        XCTAssertEqual(session.inferenceSettings.tier, "fast")
+        try workspace.addCustomModel(id: "claude-added", name: "Added")
+        XCTAssertEqual(workspace.chosenSettings.effort, "medium")
+        XCTAssertEqual(session.inferenceSettings, workspace.chosenSettings, "Add Model must persist the same effort the picker shows")
+        let reopened = Session(project: root, id: session.id, storageRoot: root, provider: .claude)
+        XCTAssertEqual(reopened.inferenceSettings, workspace.chosenSettings)
+    }
+
     func testCustomCodexModelUsesStandardAndDuplicateDisplayNamesRemainSelectable() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

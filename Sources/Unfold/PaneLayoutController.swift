@@ -9,7 +9,13 @@ private final class PaneSplitView: NSSplitView {
     private var arranging = false
 
     override var dividerColor: NSColor {
-        InterfaceStyle.hasRoundedPanes ? FeedPalette.sidebar : super.dividerColor
+        InterfaceStyle.hasRoundedPanes ? FeedPalette.backdrop : super.dividerColor
+    }
+    /// Between cards the divider is only a gap: paint it as the backdrop in
+    /// both appearances rather than as AppKit's dark hairline.
+    override func drawDivider(in rect: NSRect) {
+        guard InterfaceStyle.hasRoundedPanes else { super.drawDivider(in: rect); return }
+        FeedPalette.backdrop.setFill(); rect.fill()
     }
     private var dividerHitRect: NSRect {
         // AppKit may append a private divider/accessibility view after the two
@@ -116,6 +122,10 @@ final class PaneLayoutController: NSViewController {
     private let resized: () -> Void
     private var arranging = false
     private var lastSize = NSSize.zero
+    /// Set on the root by a scrolling pane area: the smallest size for every
+    /// pane there. Without it a pane never goes below its comfortable minimum
+    /// or its own fitting size.
+    var paneMinimum: NSSize?
 
     init(layout: PaneLayout, columns: [UUID: ChatColumn], configureHost: (TabSplitHostView, ChatColumn) -> Void,
          resized: @escaping () -> Void) {
@@ -141,37 +151,101 @@ final class PaneLayoutController: NSViewController {
             ]
             NSLayoutConstraint.activate(paneEdges)
         case .split(let vertical, let value, let first, let second):
-            fraction = value.isFinite ? min(1, max(0, value)) : 0.5
-            let controller = NSSplitViewController()
-            let splitView = PaneSplitView()
-            controller.splitView = splitView
-            splitView.isVertical = vertical
-            splitView.dividerStyle = .thin
-            split = controller
-            let frameView = PaneLayoutFrameView()
-            view = frameView
-            frameView.didLayout = { [weak self] in self?.resizeIfNeeded() }
-            addChild(controller)
-            controller.view.translatesAutoresizingMaskIntoConstraints = false
-            view.addSubview(controller.view)
-            NSLayoutConstraint.activate([
-                controller.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-                controller.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-                controller.view.topAnchor.constraint(equalTo: view.topAnchor),
-                controller.view.bottomAnchor.constraint(equalTo: view.bottomAnchor)
-            ])
+            buildSplit(vertical: vertical, fraction: value)
             for child in [first, second] {
-                let branch = PaneLayoutController(layout: child, columns: columns, configureHost: configureHost, resized: resized)
-                branch.layoutParent = self
-                branches.append(branch)
-                controller.addSplitViewItem(NSSplitViewItem(viewController: branch))
+                attach(PaneLayoutController(layout: child, columns: columns, configureHost: configureHost, resized: resized))
             }
-            splitView.positionRequested = { [weak self] position in self?.moveDivider(to: position) }
-            splitView.beginDrag = { [weak self] point in self?.beginDividerDrag(at: point) }
         }
         applyInterfaceStyle()
     }
     required init?(coder: NSCoder) { fatalError("Not implemented") }
+
+    /// A split around branches that already exist, for changing the tree in place.
+    private init(vertical: Bool, branches existing: [PaneLayoutController], resized: @escaping () -> Void) {
+        model = .split(vertical: vertical, fraction: 0.5, first: existing[0].model, second: existing[1].model)
+        self.resized = resized
+        super.init(nibName: nil, bundle: nil)
+        buildSplit(vertical: vertical, fraction: 0.5)
+        existing.forEach(attach)
+        applyInterfaceStyle()
+    }
+
+    private func buildSplit(vertical: Bool, fraction value: Double) {
+        fraction = value.isFinite ? min(1, max(0, value)) : 0.5
+        let controller = NSSplitViewController()
+        let splitView = PaneSplitView()
+        controller.splitView = splitView
+        splitView.isVertical = vertical
+        splitView.dividerStyle = .thin
+        split = controller
+        let frameView = PaneLayoutFrameView()
+        view = frameView
+        frameView.didLayout = { [weak self] in self?.resizeIfNeeded() }
+        addChild(controller)
+        controller.view.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(controller.view)
+        NSLayoutConstraint.activate([
+            controller.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            controller.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            controller.view.topAnchor.constraint(equalTo: view.topAnchor),
+            controller.view.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+        splitView.positionRequested = { [weak self] position in self?.moveDivider(to: position) }
+        splitView.beginDrag = { [weak self] point in self?.beginDividerDrag(at: point) }
+    }
+
+    private func attach(_ branch: PaneLayoutController) {
+        branch.layoutParent = self
+        branches.append(branch)
+        split?.addSplitViewItem(NSSplitViewItem(viewController: branch))
+    }
+
+    private func leaf(_ id: UUID) -> PaneLayoutController? {
+        if split == nil {
+            if case .pane(let value) = model, value == id { return self }
+            return nil
+        }
+        for branch in branches { if let found = branch.leaf(id) { return found } }
+        return nil
+    }
+
+    /// Add a pane beside an existing one without rebuilding the tree. Every
+    /// other pane keeps its views and its layout, so this stays quick however
+    /// many panes there are. Returns false when the tree must be rebuilt
+    /// instead (the target is the only pane). Follow with `balance()`.
+    func insertPane(_ column: ChatColumn, beside target: UUID, vertical: Bool, leading: Bool,
+                    configureHost: (TabSplitHostView, ChatColumn) -> Void) -> Bool {
+        guard layoutParent == nil, let existing = leaf(target), let parent = existing.layoutParent,
+              let index = parent.branches.firstIndex(where: { $0 === existing }), let container = parent.split,
+              container.splitViewItems.indices.contains(index) else { return false }
+        let added = PaneLayoutController(layout: .pane(column.columnID), columns: [column.columnID: column],
+                                         configureHost: configureHost, resized: resized)
+        container.removeSplitViewItem(container.splitViewItems[index])
+        let node = PaneLayoutController(vertical: vertical, branches: leading ? [added, existing] : [existing, added], resized: resized)
+        node.layoutParent = parent
+        parent.branches[index] = node
+        container.insertSplitViewItem(NSSplitViewItem(viewController: node), at: index)
+        equalizeWeights()
+        return true
+    }
+
+    /// Remove a pane in place; its sibling takes over their shared space.
+    /// Returns false when the tree must be rebuilt (the pane's parent is the root).
+    func removePane(_ id: UUID) -> Bool {
+        guard layoutParent == nil, let closing = leaf(id), let parent = closing.layoutParent, let grand = parent.layoutParent,
+              let index = parent.branches.firstIndex(where: { $0 === closing }),
+              let slot = grand.branches.firstIndex(where: { $0 === parent }),
+              let outer = grand.split, let inner = parent.split,
+              inner.splitViewItems.count == 2, outer.splitViewItems.indices.contains(slot) else { return false }
+        let survivor = parent.branches[1 - index]
+        inner.removeSplitViewItem(inner.splitViewItems[1 - index])
+        outer.removeSplitViewItem(outer.splitViewItems[slot])
+        survivor.layoutParent = grand
+        grand.branches[slot] = survivor
+        outer.insertSplitViewItem(NSSplitViewItem(viewController: survivor), at: slot)
+        equalizeWeights()
+        return true
+    }
 
     private var root: PaneLayoutController { layoutParent?.root ?? self }
     private var axis: Bool? { split?.splitView.isVertical }
@@ -186,8 +260,12 @@ final class PaneLayoutController: NSViewController {
             return vertical ? NSSize(width: a.width + b.width + divider, height: max(a.height, b.height))
                 : NSSize(width: max(a.width, b.width), height: a.height + b.height + divider)
         }
-        let fitting = children.first?.view.fittingSize ?? .zero
         let inset = InterfaceStyle.hasRoundedPanes ? 2 * PaneSurface.inset : 0
+        if let minimum = root.paneMinimum {
+            // Panes compact their own chrome and text to fit this floor.
+            return NSSize(width: minimum.width + inset, height: minimum.height + inset)
+        }
+        let fitting = children.first?.view.fittingSize ?? .zero
         return NSSize(width: max(PaneLayout.minimumPaneSize.width, ceil(fitting.width)) + inset,
                       height: max(PaneLayout.minimumPaneSize.height, ceil(fitting.height)) + inset)
     }
@@ -223,9 +301,37 @@ final class PaneLayoutController: NSViewController {
         // the guard through that callback, not just through the divider layout.
         defer { owner.arranging = false }
         owner.view.layoutSubtreeIfNeeded()
+        // Placing a divider lays out everything beneath it, and a deep tree
+        // places one per level. Let the panes' contents sit out those passes
+        // and follow their hosts once, at the end: many panes stay quick.
+        owner.setPaneContentsFollowHosts(false)
         owner.layoutTree()
+        // Compact each pane for its new size before its contents rejoin the
+        // layout. A pane still wearing roomy chrome would push its dividers.
+        owner.fitPaneContents()
+        owner.setPaneContentsFollowHosts(true)
+        owner.view.layoutSubtreeIfNeeded()
         owner.lastSize = owner.view.bounds.size
         owner.resized()
+    }
+
+    private func fitPaneContents() {
+        if split == nil, let column = children.first as? ChatColumn {
+            let inset = InterfaceStyle.hasRoundedPanes ? 2 * PaneSurface.inset : 0
+            let size = NSSize(width: view.bounds.width - inset, height: view.bounds.height - inset)
+            column.setDensity(PaneDensity.resolve(size: size, current: column.density))
+        }
+        branches.forEach { $0.fitPaneContents() }
+    }
+
+    /// False until the tree has been laid out for its current size at least once.
+    var isArranged: Bool { root.lastSize == root.view.bounds.size && root.lastSize != .zero }
+
+    private func setPaneContentsFollowHosts(_ follow: Bool) {
+        if split == nil {
+            if follow { NSLayoutConstraint.activate(paneEdges) } else { NSLayoutConstraint.deactivate(paneEdges) }
+        }
+        branches.forEach { $0.setPaneContentsFollowHosts(follow) }
     }
 
     private func lanes(along vertical: Bool) -> [PaneLayoutController] {
@@ -369,12 +475,18 @@ final class PaneLayoutController: NSViewController {
 
     /// Topology changes rebalance both axes, including perpendicular subgroups.
     func balance() {
-        func equalize(_ node: PaneLayoutController) {
-            if let vertical = node.axis { node.laneWeights = Array(repeating: 1, count: node.lanes(along: vertical).count) }
-            node.branches.forEach(equalize)
-        }
-        equalize(root)
+        root.equalizeWeights()
         root.restoreFractions()
+    }
+
+    private func equalizeWeights() {
+        if let vertical = axis { laneWeights = Array(repeating: 1, count: lanes(along: vertical).count) }
+        branches.forEach { $0.equalizeWeights() }
+    }
+
+    /// Every pane's host view, in layout order.
+    var paneViews: [NSView] {
+        split == nil ? [view] : branches.flatMap(\.paneViews)
     }
 
     func clearPreviews() {

@@ -101,8 +101,11 @@ enum ChatChrome {
 @MainActor
 final class ChatControlBar: NSView {
     var fill = FeedPalette.canvas { didSet { needsDisplay = true } }
+    /// Breathe separates the status line from the feed with space alone.
+    var drawsBorder = true { didSet { needsDisplay = true } }
     override func draw(_ dirtyRect: NSRect) {
         fill.setFill(); bounds.fill()
+        guard drawsBorder else { return }
         FeedPalette.line.setStroke()
         let border = NSBezierPath()
         border.move(to: NSPoint(x: bounds.minX, y: bounds.minY + 0.5))

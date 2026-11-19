@@ -5,7 +5,16 @@ import WebKit
 @MainActor
 final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     let status = NSTextField(labelWithString: "Ready")
+    let repository = NSTextField(labelWithString: "")
+    private var repositoryLookup = 0
+    private var repositoryDirectory: URL?
+    private var repositoryRefreshPending = false
     private let follow = NSButton(checkboxWithTitle: "Follow live", target: nil, action: nil)
+    private let controlBar = ChatControlBar()
+    private var barHeight: NSLayoutConstraint!
+    private let latestPill = FeedLatestPill()
+    private var lastUserScroll: TimeInterval = 0
+    private var userScrollIsUpward = false
     private let search = NSSearchField()
     private let searchRow = NSStackView()
     private let table = NSTableView()
@@ -23,6 +32,7 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
     private var batch: [(StreamRecord, Bool)] = []
     private var scheduled = false
     private var rendered: [Int: [NativeFeedBlock]] = [:]
+    private var renderedOrder: [Int] = []
     private var textReveals: [Int: StreamTextReveal] = [:]
     private var heights: [Int: CGFloat] = [:]
     private var pendingHeightRows = IndexSet()
@@ -57,6 +67,11 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
         let saved = UserDefaults.standard.double(forKey: "unfold.stream.fontSize")
         return saved == 0 ? 16 : min(28, max(8, saved))
     }()
+    /// The pane's density scales the reader's chosen size; it never replaces it.
+    private var density = PaneDensity.regular
+    private var renderSize: CGFloat { max(7, (size * density.textScale).rounded()) }
+    private let textSizeControls = NSStackView()
+    private var selectionButton: NSButton?
     private let smallerText = NSButton(title: "−", target: nil, action: nil)
     private let largerText = NSButton(title: "+", target: nil, action: nil)
     private let sizeButton = NSButton(title: "16", target: nil, action: nil)
@@ -86,8 +101,11 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
         scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.drawsBackground = false
         scroll.scrollerStyle = .overlay
         scroll.onWillResize = { [weak self] in self?.captureResizeAnchor() }
-        scroll.onUserScroll = { [weak self] in self?.resetResizeAnchor() }
-        scroll.onScrollUp = { [weak self] in self?.resetResizeAnchor(); self?.clearLiveFocus(); self?.scrollMotion.cancel(); self?.follow.state = .off; self?.publishViewState() }
+        scroll.onUserScroll = { [weak self] in
+            self?.resetResizeAnchor()
+            self?.lastUserScroll = ProcessInfo.processInfo.systemUptime; self?.userScrollIsUpward = false
+        }
+        scroll.onScrollUp = { [weak self] in self?.userScrollIsUpward = true; self?.resetResizeAnchor(); self?.clearLiveFocus(); self?.scrollMotion.cancel(); self?.follow.state = .off; self?.publishViewState() }
         scroll.contentView.postsBoundsChangedNotifications = true
         highlights.onJump = { [weak self] in self?.jump(to: $0) }
         highlights.onLatest = { [weak self] in
@@ -99,6 +117,7 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
                     self.resizeAnchor = nil
                     self.captureResizeAnchor()
                 }
+                self?.resumeIfReturnedToLatest()
                 self?.publishViewState()
             }
         }
@@ -108,6 +127,10 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
         status.lineBreakMode = .byTruncatingTail
         status.allowsExpansionToolTips = true
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        repository.font = Typography.caption; repository.textColor = FeedPalette.muted
+        repository.lineBreakMode = .byTruncatingMiddle
+        repository.isHidden = true
+        repository.setContentCompressionResistancePriority(.init(260), for: .horizontal)
         search.placeholderString = "Find in activity"; search.delegate = self
         search.font = Typography.interface
         search.setAccessibilityLabel("Find in activity")
@@ -134,15 +157,17 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
         }
         sizeButton.font = Typography.counter
         selection.widthAnchor.constraint(equalToConstant: 26).isActive = true
-        let sizes = NSStackView(views: [smallerText, sizeButton, largerText]); sizes.spacing = 4
+        let sizes = textSizeControls
+        for control in [smallerText, sizeButton, largerText] { sizes.addArrangedSubview(control) }
+        sizes.spacing = 4
+        selectionButton = selection
         smallerText.widthAnchor.constraint(equalToConstant: 24).isActive = true
         largerText.widthAnchor.constraint(equalToConstant: 24).isActive = true
         sizeButton.widthAnchor.constraint(equalToConstant: 30).isActive = true
-        let bar = NSStackView(views: [status, NSView(), selection, sizes, follow])
+        let bar = NSStackView(views: [status, repository, NSView(), selection, sizes, follow])
         bar.orientation = .horizontal; bar.alignment = .centerY; bar.spacing = 8
         let rows = NSStackView(views: [bar, searchRow])
         rows.orientation = .vertical; rows.alignment = .leading; rows.spacing = 6
-        let controlBar = ChatControlBar()
         controlBar.setAccessibilityElement(true)
         controlBar.setAccessibilityRole(.group)
         controlBar.setAccessibilityLabel("Chat control bar")
@@ -158,16 +183,69 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
             self.publishViewState()
         }
         rain.alphaValue = 0.5
-        for child in [controlBar, rain, navigatorSplit] { child.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(child) }
+        latestPill.target = self; latestPill.action = #selector(returnToLatest)
+        for child in [controlBar, rain, navigatorSplit, latestPill] { child.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(child) }
         rain.isRaining = InterfaceStyle.isMatrix
+        barHeight = bar.heightAnchor.constraint(equalToConstant: PaneSpacing.controlHeight)
         NSLayoutConstraint.activate([
+            latestPill.centerXAnchor.constraint(equalTo: scroll.centerXAnchor), latestPill.bottomAnchor.constraint(equalTo: scroll.bottomAnchor, constant: -14),
             rain.topAnchor.constraint(equalTo: navigatorSplit.topAnchor), rain.bottomAnchor.constraint(equalTo: navigatorSplit.bottomAnchor), rain.leadingAnchor.constraint(equalTo: navigatorSplit.leadingAnchor), rain.trailingAnchor.constraint(equalTo: navigatorSplit.trailingAnchor),
             controlBar.leadingAnchor.constraint(equalTo: view.leadingAnchor), controlBar.trailingAnchor.constraint(equalTo: view.trailingAnchor), controlBar.topAnchor.constraint(equalTo: view.topAnchor),
             rows.leadingAnchor.constraint(equalTo: controlBar.leadingAnchor, constant: PaneSpacing.textInset), rows.trailingAnchor.constraint(equalTo: controlBar.trailingAnchor, constant: -PaneSpacing.textInset), rows.topAnchor.constraint(equalTo: controlBar.topAnchor, constant: 4), rows.bottomAnchor.constraint(equalTo: controlBar.bottomAnchor, constant: -4),
-            bar.widthAnchor.constraint(equalTo: rows.widthAnchor), bar.heightAnchor.constraint(equalToConstant: PaneSpacing.controlHeight),
+            bar.widthAnchor.constraint(equalTo: rows.widthAnchor), barHeight,
             searchRow.widthAnchor.constraint(equalTo: rows.widthAnchor), searchRow.heightAnchor.constraint(equalToConstant: PaneSpacing.controlHeight),
             navigatorSplit.topAnchor.constraint(equalTo: controlBar.bottomAnchor), navigatorSplit.leadingAnchor.constraint(equalTo: view.leadingAnchor), navigatorSplit.trailingAnchor.constraint(equalTo: view.trailingAnchor), navigatorSplit.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+        applyChrome()
+    }
+
+    // MARK: Breathe
+
+    /// Breathe leaves only the status line here. Text size, find, asking about
+    /// a selection and following are offered by the pane's menu instead.
+    private func applyChrome() {
+        let breathe = InterfaceStyle.isBreathe, compact = density.hasCompactChrome
+        textSizeControls.isHidden = compact || breathe
+        selectionButton?.isHidden = compact || breathe
+        follow.isHidden = breathe
+        controlBar.drawsBorder = !breathe
+        barHeight.constant = breathe ? Breathe.statusHeight : PaneSpacing.controlHeight
+        refreshNavigatorVisibility()
+        refreshLatestPill()
+    }
+    var followsLive: Bool { follow.state == .on }
+    var hasTextSelection: Bool { hasSelection }
+    var canShrinkText: Bool { size > 8 }
+    var canEnlargeText: Bool { size < 28 }
+    func pauseLiveActivity() {
+        loadViewIfNeeded()
+        follow.state = .off; followChanged()
+    }
+    func askAboutSelection() { askSelection() }
+    private var distanceFromLatest: CGFloat { max(0, table.bounds.height - scroll.documentVisibleRect.maxY) }
+    private func refreshLatestPill() {
+        latestPill.setShown(InterfaceStyle.isBreathe && follow.state == .off && !records.isEmpty && distanceFromLatest > 24)
+    }
+    /// With no checkbox, scrolling back down to the newest activity is how
+    /// following resumes.
+    private func resumeIfReturnedToLatest() {
+        guard InterfaceStyle.isBreathe, follow.state == .off, !userScrollIsUpward, !restoringPosition, !records.isEmpty,
+              ProcessInfo.processInfo.systemUptime - lastUserScroll < 0.4, !hasSelection,
+              table.bounds.height > scroll.contentSize.height, distanceFromLatest < 2 else { return }
+        resumeLiveActivity()
+    }
+    /// Follow again from wherever the reader is. A long jump can stop a row
+    /// short while AppKit tiles the rows it reveals; settle once they exist.
+    @objc func returnToLatest() {
+        resumeLiveActivity(animated: true)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.follow.state == .on, self.liveFocus == nil else { return }
+            self.followLatest(animated: false)
+        }
+    }
+    /// An empty pane has nothing to navigate; Breathe leaves the room to the feed.
+    private func refreshNavigatorVisibility() {
+        navigatorSplit.navigatorHidden = density.hasCompactChrome || (InterfaceStyle.isBreathe && records.isEmpty)
     }
 
     override func viewDidLayout() {
@@ -223,6 +301,53 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
     private func resetResizeAnchor() {
         resizeAnchor = nil; resizeAnchorExpiry?.cancel(); resizeAnchorExpiry = nil
     }
+    /// Shows the branch (and linked worktree) the agent is working in beside
+    /// the status: the chat's folder, or the worktree its latest activity names.
+    func showRepository(of directory: URL?) {
+        loadViewIfNeeded()
+        repositoryDirectory = directory
+        refreshRepository()
+    }
+    private func refreshRepository() {
+        repositoryLookup += 1
+        let lookup = repositoryLookup
+        guard let directory = repositoryDirectory else { applyRepository(nil); return }
+        let activity = RepositoryLocation.activity(in: records)
+        Task.detached(priority: .utility) {
+            let location = RepositoryLocation.active(project: directory, activity: activity)
+            await MainActor.run { [weak self] in
+                guard let self, self.repositoryLookup == lookup else { return }
+                self.applyRepository(location)
+            }
+        }
+    }
+    /// Commands and edits can move the agent to another worktree mid-turn.
+    private func scheduleRepositoryRefresh() {
+        guard repositoryDirectory != nil, !repositoryRefreshPending else { return }
+        repositoryRefreshPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self else { return }
+            self.repositoryRefreshPending = false
+            self.refreshRepository()
+        }
+    }
+    private func applyRepository(_ location: RepositoryLocation?) {
+        guard let location else { repository.isHidden = true; repository.stringValue = ""; return }
+        let text = NSMutableAttributedString()
+        if let symbol = NSImage(systemSymbolName: location.worktree == nil ? "arrow.triangle.branch" : "square.stack.3d.up", accessibilityDescription: nil) {
+            let attachment = NSTextAttachment(); attachment.image = symbol
+            let font = Typography.caption
+            attachment.bounds = NSRect(x: 0, y: font.descender + 1, width: font.pointSize, height: font.pointSize)
+            text.append(NSAttributedString(attachment: attachment)); text.append(NSAttributedString(string: " "))
+        }
+        text.append(NSAttributedString(string: location.summary))
+        text.addAttributes([.font: Typography.caption, .foregroundColor: FeedPalette.muted], range: NSRange(location: 0, length: text.length))
+        repository.attributedStringValue = text
+        repository.toolTip = "\(location.isDetached ? "Detached HEAD" : "Branch") \(location.branch)" +
+            (location.worktree.map { " in worktree \($0)" } ?? "") + "\n" + location.root.path + "\nFollows the folder the agent last worked in"
+        repository.setAccessibilityLabel((location.worktree == nil ? "Branch " : "Worktree branch ") + location.summary)
+        repository.isHidden = false
+    }
     private var contentWidth: CGFloat { max(120, scroll.contentSize.width) }
     func numberOfRows(in tableView: NSTableView) -> Int { records.count }
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
@@ -230,6 +355,7 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
         // AppKit asks for every row's height during scrolling. Never parse or
         // typeset offscreen history from this callback.
         let count = records[row].text.utf8.count
+        let size = renderSize
         let columns = max(24, Int(contentWidth / max(5, size * 0.6)))
         return max(70, min(30_000, CGFloat(count / columns + 2) * size * 1.4 + 40))
     }
@@ -239,11 +365,34 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
         let view = NativeFeedRow(blocks: content, width: contentWidth, images: images, reveal: textReveals[row],
                                  accent: rowAccent(row),
                                  openHTML: { [weak self] in self?.showHTML($0) }, openImage: { [weak self] in self?.showImage($0) })
+        view.onHeightChange = { [weak self] in self?.rowDidResize($0) }
         if heights[row] != view.contentHeight {
             heights[row] = view.contentHeight
             scheduleHeightUpdate(row)
         }
         return view
+    }
+    /// A card was expanded or collapsed: keep the row's top where it is.
+    private func rowDidResize(_ content: NativeFeedRow) {
+        let row = table.row(for: content)
+        guard records.indices.contains(row), heights[row] != content.contentHeight else { return }
+        heights[row] = content.contentHeight
+        let y = scroll.documentVisibleRect.minY
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0; context.allowsImplicitAnimation = false
+            table.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
+            table.layoutSubtreeIfNeeded()
+            scrollTo(y: y)
+        }
+        publishViewState()
+    }
+    /// Find and highlight jumps must not land inside a collapsed card's hidden lines.
+    private func expandCollapsedCard(around text: NativeFeedTextView) {
+        var node = text.superview
+        while let current = node {
+            if let card = current as? NativeCodeView { card.setExpanded(true); return }
+            node = current.superview
+        }
     }
     private func scheduleHeightUpdate(_ row: Int) {
         guard !updatingRows else { return }
@@ -276,7 +425,7 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
     private func blocks(_ row: Int) -> [NativeFeedBlock] {
         if let value = rendered[row] { return value }
         guard records.indices.contains(row) else { return [] }
-        var renderer = NativeFeedRenderer(size: size, analyses: analyses)
+        var renderer = NativeFeedRenderer(size: renderSize, analyses: analyses)
         var value = renderer.render(records[row])
         let requests = renderer.requestedCode
         deferredAnalysis.removeValue(forKey: row)?.cancel()
@@ -298,28 +447,39 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
             let key = reference.source
             imageRows[key, default: []].insert(row)
             if imageFailures.contains(key) {
-                value[index] = .text(NSAttributedString(string: "Image unavailable", attributes: [.font: NSFont.systemFont(ofSize: size), .foregroundColor: NSColor.secondaryLabelColor])); continue
+                value[index] = .text(NSAttributedString(string: "Image unavailable", attributes: [.font: NSFont.systemFont(ofSize: renderSize), .foregroundColor: NSColor.secondaryLabelColor])); continue
             }
             guard images[key] == nil, pendingImages.insert(key).inserted else { continue }
-            let project = projectDirectory
+            let project = projectDirectory, generation = viewStateGeneration
             Task { [weak self] in
                 let data = try? await NativeImageStore.shared.data(for: reference, project: project)
-                guard let self else { return }
+                guard let self, self.viewStateGeneration == generation else { return }
                 if let data, let image = NSImage(data: data) { self.images[key] = image }
                 else { self.imageFailures.insert(key) }
                 self.pendingImages.remove(key); self.refreshRows(self.imageRows[key] ?? [])
             }
         }
-        rendered[row] = value
+        // Table rows are virtualized; their attributed strings must be too.
+        // Retain a small recent working set, not every row ever scrolled past.
+        renderedOrder.removeAll { !records.indices.contains($0) || rendered[$0] == nil || $0 == row }
+        rendered[row] = value; renderedOrder.append(row)
+        var cost = renderedOrder.reduce(0) { $0 + records[$1].text.utf8.count * 4 }
+        while renderedOrder.count > 64 || cost > 8 * 1024 * 1024 {
+            let oldest = renderedOrder.removeFirst()
+            cost -= records[oldest].text.utf8.count * 4
+            rendered.removeValue(forKey: oldest)
+        }
         return value
     }
     private func analyze(_ request: CodeAnalysisRequest, row: Int) {
+        guard request.source.utf8.count <= 262_144 else { return }
         let key = request.key
         pythonRows[key, default: []].insert(row)
         guard analyses[key] == nil, pendingPython.insert(key).inserted else { return }
+        let generation = viewStateGeneration
         Task { [weak self] in
             let result = await CodeAnalysisService.shared.analyze(request)
-            guard let self else { return }
+            guard let self, self.viewStateGeneration == generation else { return }
             self.analyses[key] = result; self.pendingPython.remove(key)
             self.refreshRows(self.pythonRows[key] ?? [])
         }
@@ -369,6 +529,8 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
                 scrollTo(y: anchor?.position(in: table) ?? fallback)
             } else { followLatest() }
         }
+        // Activity that arrives below a paused reader moves nothing on screen.
+        refreshLatestPill()
     }
     func append(_ record: StreamRecord, item: String? = nil, delta: Bool = false) {
         loadViewIfNeeded(); var value = record; value.itemID = item ?? value.itemID
@@ -404,6 +566,10 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
             }
         }
         for (record, delta) in conversation { onConversationAppend?(record, delta) }
+        if values.contains(where: { [StreamKind.command.rawValue, StreamKind.change.rawValue, StreamKind.tool.rawValue].contains($0.0.kind) }) {
+            scheduleRepositoryRefresh()
+        }
+        if oldCount == 0 { refreshNavigatorVisibility() }
         updateRows(IndexSet(integersIn: start..<records.count), insertingFrom: oldCount)
         scheduleHighlights(from: start)
     }
@@ -412,6 +578,7 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
     }
     private func followLatest(animated: Bool = true) {
         highlights.setFollowingLatest(follow.state == .on && liveFocus == nil)
+        refreshLatestPill()
         guard follow.state == .on, !records.isEmpty, !hasSelection, !followingLatest else { return }
         followingLatest = true
         defer { followingLatest = false }
@@ -508,15 +675,20 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
         resetResizeAnchor()
         clearLiveFocus(); liveHighlightRows.removeAll()
         loadViewIfNeeded(); scrollMotion.cancel(); batch.removeAll(); feed = FeedBuffer(values)
+        refreshNavigatorVisibility()
         onConversationReplace?(values)
         viewStateGeneration += 1; pendingViewState = nil; restoringPosition = false
         search.stringValue = ""; searchRow.isHidden = true
         follow.state = .on
         textReveals.removeAll()
         rendered.removeAll(); heights.removeAll(); pythonRows.removeAll(); imageRows.removeAll()
+        renderedOrder.removeAll()
+        images.removeAll(); pendingImages.removeAll(); imageFailures.removeAll()
+        analyses.removeAll(); pendingPython.removeAll()
         deferredAnalysis.values.forEach { $0.cancel() }; deferredAnalysis.removeAll()
         highlightGeneration += 1; highlightEntries.removeAll(); highlights.reset()
         scheduleHighlights(from: 0)
+        scheduleRepositoryRefresh()
         table.reloadData(); followLatest(animated: false)
     }
     func finalizeResponse(_ response: StreamRecord) {
@@ -569,11 +741,34 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
         refreshFontControls(); rendered.removeAll(); heights.removeAll(); table.reloadData(); followLatest()
         publishViewState()
     }
+    /// A cramped pane drops the navigator and secondary controls and sets its
+    /// text smaller; a roomy one restores them. The saved text size is untouched.
+    func setDensity(_ value: PaneDensity) {
+        loadViewIfNeeded()
+        guard value != density else { return }
+        let retypeset = value.textScale != density.textScale
+        density = value
+        let compact = value.hasCompactChrome
+        applyChrome()
+        follow.title = compact ? "Live" : "Follow live"
+        follow.toolTip = compact ? "Follow live activity" : nil
+        guard retypeset else { return }
+        resetResizeAnchor()
+        let following = follow.state == .on
+        let top = table.row(at: NSPoint(x: 1, y: scroll.documentVisibleRect.minY))
+        rendered.removeAll(); heights.removeAll(); textReveals.removeAll(); table.reloadData()
+        if following { followLatest(animated: false) }
+        else if records.indices.contains(top) {
+            table.layoutSubtreeIfNeeded()
+            scrollTo(y: table.rect(ofRow: top).minY)
+        }
+    }
     /// Fonts and wrapping differ between styles, so every row is typeset again.
     func applyInterfaceStyle() {
         loadViewIfNeeded()
         rain.isRaining = InterfaceStyle.isMatrix
         rain.surge()
+        applyChrome()
         rendered.removeAll(); heights.removeAll(); textReveals.removeAll(); table.reloadData(); followLatest(animated: false)
     }
     private func refreshFontControls() {
@@ -592,6 +787,7 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
     }
     private func publishViewState() {
         highlights.setFollowingLatest(follow.state == .on && liveFocus == nil)
+        refreshLatestPill()
         if !restoringPosition {
             let state = viewState
             if let liveFocus { highlights.markFocused(liveFocus) }
@@ -717,6 +913,7 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
             if let text = node as? NativeFeedTextView, let layout = text.layoutManager, let container = text.textContainer {
                 let range = (text.string as NSString).range(of: needle, options: [.caseInsensitive, .diacriticInsensitive])
                 if range.location != NSNotFound {
+                    expandCollapsedCard(around: text)
                     let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
                     let box = layout.boundingRect(forGlyphRange: glyphs, in: container)
                     scrollTo(y: text.convert(box, to: table).minY - 8)
@@ -785,7 +982,7 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
         func select(in view: NSView) -> Bool {
             if let text = view as? NativeFeedTextView {
                 let range = (text.string as NSString).range(of: query, options: .caseInsensitive)
-                if range.location != NSNotFound { text.setSelectedRange(range); text.scrollRangeToVisible(range); return true }
+                if range.location != NSNotFound { expandCollapsedCard(around: text); text.setSelectedRange(range); text.scrollRangeToVisible(range); return true }
             }
             return view.subviews.contains { select(in: $0) }
         }

@@ -3,6 +3,19 @@ import QuartzCore
 
 @MainActor
 private final class TabScrollView: NSScrollView {
+    /// Clicks on tabs never reach the strip; only its empty part does.
+    var onEmptyDoubleClick: (() -> Bool)?
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2, onEmptyDoubleClick?() == true { return }
+        super.mouseDown(with: event)
+    }
+    /// The pane's own layout callback runs before this nested strip is sized.
+    var onWidthChange: (() -> Void)?
+    override func setFrameSize(_ newSize: NSSize) {
+        let changed = abs(newSize.width - frame.width) > 0.5
+        super.setFrameSize(newSize)
+        if changed { onWidthChange?() }
+    }
     override func scrollWheel(with event: NSEvent) {
         guard let documentView else { return }
         let delta = event.scrollingDeltaX != 0 ? event.scrollingDeltaX : event.scrollingDeltaY
@@ -106,7 +119,33 @@ final class ChatTabButton: NSButton {
     }
 
     var isHovering = false { didSet { needsDisplay = true } }
+    /// Breathe: the selected surface slides behind the strip (see
+    /// `BreatheTabSelection`), so a tab draws only its wash, title and state.
+    /// The title keeps the whole tab until its close button is showing.
+    private func drawBreathe() {
+        let selected = state == .on
+        if !selected, isHighlighted || isHovering {
+            FeedPalette.text.withAlphaComponent(isHighlighted ? 0.09 : 0.045).setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 4), xRadius: Breathe.tabRadius, yRadius: Breathe.tabRadius).fill()
+        }
+        let style = NSMutableParagraphStyle(); style.lineBreakMode = .byTruncatingTail; style.alignment = .left
+        let label = NSAttributedString(string: title, attributes: [.font: selected ? Typography.interfaceEmphasis : Typography.interface, .foregroundColor: selected || isHovering ? FeedPalette.text : FeedPalette.muted, .paragraphStyle: style])
+        let leading: CGFloat = isRunning ? 24 : 12
+        let trailing: CGFloat = selected || isHovering ? 26 : 10
+        let labelHeight = ceil(label.size().height)
+        label.draw(in: NSRect(x: leading, y: (bounds.height - labelHeight) / 2, width: max(0, bounds.width - leading - trailing), height: labelHeight))
+        if isRunning {
+            FeedPalette.blue.setFill()
+            NSBezierPath(ovalIn: NSRect(x: 11, y: (bounds.height - 6) / 2, width: 6, height: 6)).fill()
+        }
+        if window?.firstResponder === self {
+            NSColor.keyboardFocusIndicatorColor.setStroke()
+            let focus = NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 5.5), xRadius: Breathe.tabRadius - 1.5, yRadius: Breathe.tabRadius - 1.5)
+            focus.lineWidth = 2; focus.stroke()
+        }
+    }
     override func draw(_ dirtyRect: NSRect) {
+        if InterfaceStyle.isBreathe { drawBreathe(); return }
         if state == .on {
             ChatChrome.drawSelectedTab(in: bounds, flipped: isFlipped)
         } else {
@@ -159,8 +198,14 @@ final class ChatTabItem: NSView {
         for child in [tab, closeButton] { child.translatesAutoresizingMaskIntoConstraints = false; addSubview(child) }
         NSLayoutConstraint.activate([
             tab.topAnchor.constraint(equalTo: topAnchor), tab.bottomAnchor.constraint(equalTo: bottomAnchor), tab.leadingAnchor.constraint(equalTo: leadingAnchor), tab.trailingAnchor.constraint(equalTo: trailingAnchor),
-            closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6), closeButton.centerYAnchor.constraint(equalTo: centerYAnchor), closeButton.widthAnchor.constraint(equalToConstant: 24), closeButton.heightAnchor.constraint(equalToConstant: 24)
+            closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: InterfaceStyle.isBreathe ? -4 : -6), closeButton.centerYAnchor.constraint(equalTo: centerYAnchor), closeButton.widthAnchor.constraint(equalToConstant: InterfaceStyle.isBreathe ? 20 : 24), closeButton.heightAnchor.constraint(equalToConstant: InterfaceStyle.isBreathe ? 20 : 24)
         ])
+    }
+    /// Breathe: a middle click closes a tab without selecting it first.
+    override func otherMouseUp(with event: NSEvent) {
+        guard InterfaceStyle.isBreathe, event.buttonNumber == 2,
+              bounds.contains(convert(event.locationInWindow, from: nil)) else { super.otherMouseUp(with: event); return }
+        onClose()
     }
     required init?(coder: NSCoder) { fatalError("Not implemented") }
     override func updateTrackingAreas() {
@@ -204,6 +249,37 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
     private let dropHint = ImageDropHint()
     private var cardHeight: NSLayoutConstraint!
     private var conversationHeight: NSLayoutConstraint!
+    private var conversationMinimum: NSLayoutConstraint!
+    private var conversationCollapsed: NSLayoutConstraint!
+    private var conversationGap: NSLayoutConstraint!
+    private let conversationDivider = WorkspaceSurface(fill: FeedPalette.line)
+    private let newButton = QuietIconButton()
+    private let moreButton = QuietIconButton()
+    private let tabActions = NSStackView()
+    private let tabSelection = BreatheTabSelection()
+    private let topDivider = WorkspaceSurface(fill: FeedPalette.line)
+    private let paneSpacer = NSView()
+    private var tabBarStack: NSStackView?
+    private var paneControls: NSStackView?
+    private var paneControlsHeight: NSLayoutConstraint?
+    private var tabScrollWidth: NSLayoutConstraint?
+    private var tabBarTop: NSLayoutConstraint!
+    private var tabBarHeight: NSLayoutConstraint!
+    private var streamTop: NSLayoutConstraint!
+    private var cardBottom: NSLayoutConstraint!
+    private var tabsInline = false
+    private var tabNaturalWidths: [CGFloat] = []
+    private var tabWidthConstraints: [NSLayoutConstraint] = []
+    private var selectedTabPosition: Int?
+    private var fittedTabRoom: CGFloat = 0
+    private var shownTabs: [(Int, Session)] = []
+    private var shownSplit = false
+    private var paneButtonWidths: [NSLayoutConstraint] = []
+    private var edgeInsets: [NSLayoutConstraint] = []
+    private var composerInsets: [NSLayoutConstraint] = []
+    /// Follows the pane's own size, so a cramped display compacts chrome and
+    /// text while a roomy one returns to the reader's chosen sizes.
+    private(set) var density = PaneDensity.regular
     private let conversationHandle = ConversationResizeHandle()
     private var conversationDragStart: CGFloat = 0
     private(set) var conversationFraction = ConversationSplit.stored()
@@ -228,6 +304,22 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
     var onFocus: (() -> Void)?
     var onPrepareAttachment: (() -> Void)?
     var onImportedAttachments: ((UUID, [ChatAttachment]) -> Void)?
+    /// Move a waiting message to a model on this Mac.
+    var onAnswerLocally: ((UUID) -> Void)?
+
+    /// Take a message that has not been sent back into the composer.
+    func cancelQueuedChat(_ id: UUID) {
+        guard let session, let message = try? session.withdrawQueuedChat(id) else { return }
+        let draft = prompt.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        prompt.string = draft.isEmpty ? message.text : message.text + "\n\n" + prompt.string
+        prompt.needsDisplay = true
+        let existing = Set(attachments.map(\.id))
+        let restored = message.attachments.filter { !existing.contains($0.id) && FileManager.default.isReadableFile(atPath: $0.path) }
+        if !restored.isEmpty { setAttachments(Array((restored + attachments).prefix(ChatAttachment.maximumCount)), animated: true) }
+        view.window?.makeFirstResponder(prompt)
+        onDraftChange?()
+        refresh()
+    }
 
     override func loadView() {
         view = tabsOnly ? WorkspaceSurface() : PaneSurface(); addChild(stream)
@@ -238,12 +330,34 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
         stream.onConversationReplace = { [weak self] in self?.conversation.replace($0) }
         stream.onConversationQueueUpdate = { [weak self] in self?.conversation.replace($0, preservingPosition: true) }
         conversation.onRetryQueuedChat = { [weak self] in self?.session?.resumeMessageQueue(retryBlocked: true) }
+        conversation.onCancelQueuedChat = { [weak self] in self?.cancelQueuedChat($0) }
+        conversation.onAnswerQueuedChatLocally = { [weak self] in self?.onAnswerLocally?($0) }
         stream.onConversationFinalize = { [weak self] in self?.conversation.finalizeResponse($0) }
         tabs.orientation = .horizontal; tabs.spacing = 6
+        tabSelection.isHidden = true
+        tabs.addSubview(tabSelection, positioned: .below, relativeTo: nil)
         tabScroll.documentView = tabs; tabScroll.drawsBackground = false
         tabScroll.hasHorizontalScroller = false; tabScroll.hasVerticalScroller = false
+        tabScroll.onWidthChange = { [weak self] in
+            guard InterfaceStyle.isBreathe, let self, abs(self.tabScroll.contentSize.width - self.fittedTabRoom) > 0.5 else { return }
+            self.fitTabs()
+        }
+        tabScroll.onEmptyDoubleClick = { [weak self] in
+            guard InterfaceStyle.isBreathe, let self else { return false }
+            self.onNewChat?(); return true
+        }
+        moreButton.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: "Pane options")
+        moreButton.bezelStyle = .texturedRounded; moreButton.imagePosition = .imageOnly
+        moreButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+        moreButton.target = self; moreButton.action = #selector(showPaneMenu(_:))
+        moreButton.toolTip = tabsOnly ? "Text size, find and more" : "Split, stack, text size and more"
+        moreButton.setAccessibilityLabel(tabsOnly ? "Chat options" : "Pane options")
+        moreButton.isQuiet = true; moreButton.isHidden = true
+        NSLayoutConstraint.activate([moreButton.widthAnchor.constraint(equalToConstant: 30), moreButton.heightAnchor.constraint(equalToConstant: 30)])
         let newTitle = tabsOnly ? "New tab" : "New chat in this pane"
-        let new = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: newTitle)!, target: self, action: #selector(newChat))
+        let new = newButton
+        new.image = NSImage(systemSymbolName: "plus", accessibilityDescription: newTitle)
+        new.target = self; new.action = #selector(newChat)
         new.toolTip = newTitle
         new.setAccessibilityLabel(newTitle)
         splitButton.image = NSImage(systemSymbolName: "rectangle.split.2x1", accessibilityDescription: "Split pane")
@@ -265,16 +379,20 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
             button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
             button.heightAnchor.constraint(equalToConstant: 30).isActive = true
         }
-        new.widthAnchor.constraint(equalToConstant: 36).isActive = true
         closePaneButton.isBordered = false
-        closePaneButton.widthAnchor.constraint(equalToConstant: 30).isActive = true
+        // Fixed widths, so a pane narrower than its labelled buttons yields
+        // gracefully until the compact chrome takes over.
+        paneButtonWidths = [new.widthAnchor.constraint(equalToConstant: 36),
+                            splitButton.widthAnchor.constraint(equalToConstant: 72),
+                            stackButton.widthAnchor.constraint(equalToConstant: 72),
+                            closePaneButton.widthAnchor.constraint(equalToConstant: 30)]
+        for constraint in paneButtonWidths { constraint.priority = .init(999); constraint.isActive = true }
         for button in [splitButton, stackButton] {
             button.imagePosition = .imageLeading
             button.font = Typography.caption
-            button.setContentCompressionResistancePriority(.required, for: .horizontal)
-            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 72).isActive = true
+            button.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         }
-        let tabActions = NSStackView(views: tabsOnly ? [new] : [new, splitButton, stackButton, closePaneButton])
+        for view in tabsOnly ? [new, moreButton] : [new, splitButton, stackButton, closePaneButton, moreButton] { tabActions.addArrangedSubview(view) }
         tabActions.orientation = .horizontal; tabActions.alignment = .centerY; tabActions.spacing = 8
         let tabBar: NSStackView
         if tabsOnly {
@@ -283,16 +401,20 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
             tabActions.setContentHuggingPriority(.required, for: .horizontal)
             tabScroll.setContentHuggingPriority(.defaultLow, for: .horizontal)
         } else {
-            let paneControls = NSStackView(views: [NSView(), tabActions])
+            let paneControls = NSStackView(views: [paneSpacer, tabActions])
             paneControls.orientation = .horizontal; paneControls.spacing = 0
             tabBar = NSStackView(views: [paneControls, tabScroll])
             tabBar.orientation = .vertical; tabBar.alignment = .leading; tabBar.spacing = 4
+            let controlsHeight = paneControls.heightAnchor.constraint(equalToConstant: 30)
+            let scrollWidth = tabScroll.widthAnchor.constraint(equalTo: tabBar.widthAnchor)
             NSLayoutConstraint.activate([
                 paneControls.widthAnchor.constraint(equalTo: tabBar.widthAnchor),
-                paneControls.heightAnchor.constraint(equalToConstant: 30),
-                tabScroll.widthAnchor.constraint(equalTo: tabBar.widthAnchor)
+                controlsHeight,
+                scrollWidth
             ])
+            self.paneControls = paneControls; paneControlsHeight = controlsHeight; tabScrollWidth = scrollWidth
         }
+        tabBarStack = tabBar
         tabScroll.heightAnchor.constraint(equalToConstant: 38).isActive = true
         let scroll = NSScrollView(); scroll.documentView = prompt; scroll.hasVerticalScroller = true
         scroll.drawsBackground = false; scroll.borderType = .noBorder
@@ -345,14 +467,18 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
         let controls = NSStackView(views: [attachmentStatus, NSView(), stopButton, sendButton]); controls.orientation = .horizontal; controls.spacing = 8
         for child in [attachmentScroll, scroll, controls, dropHint] { child.translatesAutoresizingMaskIntoConstraints = false; card.addSubview(child) }
         dropHint.alphaValue = 0
-        let conversationDivider = WorkspaceSurface(fill: FeedPalette.line)
         conversationDivider.setAccessibilityElement(false)
-        let topDivider = WorkspaceSurface(fill: FeedPalette.line)
         topDivider.setAccessibilityElement(false)
         for child in [topDivider, tabBar, stream.view, conversationDivider, conversation, card, conversationHandle] { child.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(child) }
         conversationHeight = makeConversationHeight(conversationFraction)
-        let conversationMinimum = conversation.heightAnchor.constraint(greaterThanOrEqualToConstant: ConversationSplit.minimumHeight)
+        conversationMinimum = conversation.heightAnchor.constraint(greaterThanOrEqualToConstant: ConversationSplit.minimumHeight)
         conversationMinimum.priority = .init(999)
+        conversationCollapsed = conversation.heightAnchor.constraint(equalToConstant: 0)
+        conversationGap = conversation.bottomAnchor.constraint(equalTo: card.topAnchor, constant: -PaneSpacing.gap)
+        edgeInsets = [tabBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: PaneSpacing.textInset),
+                      tabBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -PaneSpacing.textInset)]
+        composerInsets = [card.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: PaneSpacing.composerInset),
+                          card.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -PaneSpacing.composerInset)]
         let streamMinimum = stream.view.heightAnchor.constraint(greaterThanOrEqualToConstant: ConversationSplit.minimumStreamHeight)
         streamMinimum.priority = .init(999)
         conversationHandle.onBegin = { [weak self] in
@@ -372,27 +498,187 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
         }
         cardHeight = card.heightAnchor.constraint(equalToConstant: 120)
         attachmentHeight = attachmentScroll.heightAnchor.constraint(equalToConstant: 0)
+        tabBarTop = tabBar.topAnchor.constraint(equalTo: view.topAnchor, constant: 4)
+        tabBarHeight = tabBar.heightAnchor.constraint(equalToConstant: tabsOnly ? 38 : 72)
+        streamTop = stream.view.topAnchor.constraint(equalTo: tabBar.bottomAnchor, constant: 2)
+        cardBottom = card.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8)
         NSLayoutConstraint.activate([
             topDivider.topAnchor.constraint(equalTo: view.topAnchor),
             topDivider.leadingAnchor.constraint(equalTo: view.leadingAnchor), topDivider.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             topDivider.heightAnchor.constraint(equalToConstant: 1),
-            tabBar.topAnchor.constraint(equalTo: view.topAnchor, constant: 4), tabBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: PaneSpacing.textInset), tabBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -PaneSpacing.textInset), tabBar.heightAnchor.constraint(equalToConstant: tabsOnly ? 38 : 72),
-            stream.view.topAnchor.constraint(equalTo: tabBar.bottomAnchor, constant: 2), stream.view.leadingAnchor.constraint(equalTo: view.leadingAnchor), stream.view.trailingAnchor.constraint(equalTo: view.trailingAnchor), stream.view.bottomAnchor.constraint(equalTo: conversation.topAnchor, constant: -PaneSpacing.gap),
+            tabBarTop, edgeInsets[0], edgeInsets[1], tabBarHeight,
+            streamTop, stream.view.leadingAnchor.constraint(equalTo: view.leadingAnchor), stream.view.trailingAnchor.constraint(equalTo: view.trailingAnchor), stream.view.bottomAnchor.constraint(equalTo: conversation.topAnchor, constant: -PaneSpacing.gap),
             conversationDivider.leadingAnchor.constraint(equalTo: view.leadingAnchor), conversationDivider.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             conversationDivider.centerYAnchor.constraint(equalTo: conversation.topAnchor, constant: -2), conversationDivider.heightAnchor.constraint(equalToConstant: 1),
             conversation.leadingAnchor.constraint(equalTo: view.leadingAnchor), conversation.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            conversation.bottomAnchor.constraint(equalTo: card.topAnchor, constant: -PaneSpacing.gap),
+            conversationGap,
             conversationHeight, conversationMinimum, streamMinimum,
             conversationHandle.leadingAnchor.constraint(equalTo: view.leadingAnchor), conversationHandle.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             conversationHandle.centerYAnchor.constraint(equalTo: conversationDivider.centerYAnchor), conversationHandle.heightAnchor.constraint(equalToConstant: ConversationResizeHandle.thickness),
-            card.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: PaneSpacing.composerInset), card.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -PaneSpacing.composerInset), card.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8), cardHeight,
+            composerInsets[0], composerInsets[1], cardBottom, cardHeight,
             attachmentScroll.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: PaneSpacing.gap), attachmentScroll.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -PaneSpacing.gap), attachmentScroll.topAnchor.constraint(equalTo: card.topAnchor, constant: 2), attachmentHeight,
             scroll.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 2), scroll.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -2), scroll.topAnchor.constraint(equalTo: attachmentScroll.bottomAnchor, constant: 2), scroll.bottomAnchor.constraint(equalTo: controls.topAnchor, constant: -6),
             dropHint.leadingAnchor.constraint(equalTo: card.leadingAnchor), dropHint.trailingAnchor.constraint(equalTo: card.trailingAnchor), dropHint.topAnchor.constraint(equalTo: card.topAnchor), dropHint.bottomAnchor.constraint(equalTo: card.bottomAnchor),
             controls.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 12), controls.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -12), controls.heightAnchor.constraint(equalToConstant: 28), controls.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -12)
         ])
+        applyChrome()
     }
     private(set) var isActivePane = false
+
+    // MARK: Breathe
+
+    /// Breathe puts the tabs and the pane's two remaining buttons on one row,
+    /// and gives the height that frees to the work. Everything the removed
+    /// buttons did is in the pane menu.
+    private func applyChrome() {
+        let breathe = InterfaceStyle.isBreathe
+        topDivider.isHidden = breathe
+        for button in [splitButton, stackButton, closePaneButton] { button.isHidden = breathe }
+        moreButton.isHidden = !breathe
+        newButton.isQuiet = breathe
+        tabs.spacing = breathe ? Breathe.tabSpacing : 6
+        tabBarTop.constant = breathe ? Breathe.tabTopInset : 4
+        streamTop.constant = breathe ? 4 : 2
+        cardBottom.constant = breathe ? -Breathe.composerBottom : -8
+        if breathe != tabsInline, let paneControls, let tabBar = tabBarStack {
+            tabsInline = breathe
+            if breathe {
+                tabBar.removeArrangedSubview(tabScroll); tabScroll.removeFromSuperview()
+                paneSpacer.isHidden = true
+                paneControls.insertArrangedSubview(tabScroll, at: 0)
+            } else {
+                paneControls.removeArrangedSubview(tabScroll); tabScroll.removeFromSuperview()
+                paneSpacer.isHidden = false
+                tabBar.addArrangedSubview(tabScroll)
+                tabScrollWidth?.isActive = true
+            }
+            paneControls.spacing = breathe ? 8 : 0
+            paneControlsHeight?.constant = breathe ? 38 : 30
+            tabBarHeight.constant = breathe ? 38 : 72
+        }
+        stopButton.isHidden = breathe && session?.turn == nil
+        updateTabs(shownTabs, isSplit: shownSplit)
+    }
+
+    /// Size the strip. Breathe shares the row between its tabs before it scrolls.
+    private func fitTabs(slidingSelection: Bool = false) {
+        let breathe = InterfaceStyle.isBreathe
+        var widths = tabNaturalWidths
+        fittedTabRoom = tabScroll.contentSize.width
+        if breathe, fittedTabRoom > 0 {
+            widths = Breathe.tabWidths(widths, available: fittedTabRoom, spacing: tabs.spacing, minimum: Breathe.tabMinimum)
+        }
+        for (constraint, width) in zip(tabWidthConstraints, widths) where constraint.constant != width { constraint.constant = width }
+        let total = widths.reduce(0, +) + tabs.spacing * CGFloat(max(0, widths.count - 1))
+        tabs.frame = NSRect(x: 0, y: 0, width: max(1, total), height: 38)
+        guard breathe, let position = selectedTabPosition else { tabSelection.isHidden = true; return }
+        tabSelection.move(to: Breathe.tabFrame(at: position, widths: widths, spacing: tabs.spacing, height: 38), animated: slidingSelection)
+        tabSelection.isHidden = false
+    }
+
+    @objc private func showPaneMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        func add(_ title: String, _ action: Selector, key: String = "", modifiers: NSEvent.ModifierFlags = .command,
+                 enabled: Bool = true, checked: Bool = false) {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers; item.target = self
+            item.isEnabled = enabled; item.state = checked ? .on : .off
+        }
+        add(tabsOnly ? "New Tab" : "New Chat", #selector(newChat), key: "n")
+        if !tabsOnly {
+            menu.addItem(.separator())
+            add("Split Right", #selector(splitRight), key: "p", enabled: splitButton.isEnabled)
+            add("Stack Below", #selector(splitBelow), key: "\\", modifiers: [.command, .shift], enabled: stackButton.isEnabled)
+        }
+        menu.addItem(.separator())
+        add("Follow Live Activity", #selector(toggleFollowing), checked: stream.followsLive)
+        add("Find in Activity…", #selector(findInActivity), key: "f")
+        add("Ask About Selection", #selector(askAboutSelection), enabled: stream.hasTextSelection)
+        menu.addItem(.separator())
+        add("Larger Text", #selector(largerText), key: "+", enabled: stream.canEnlargeText)
+        add("Smaller Text", #selector(smallerText), key: "-", enabled: stream.canShrinkText)
+        add("Actual Size", #selector(actualTextSize), key: "0")
+        if !tabsOnly {
+            menu.addItem(.separator())
+            add("Close Pane", #selector(closePane), enabled: closePaneButton.isEnabled)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY + 4), in: sender)
+    }
+    @objc private func toggleFollowing() {
+        if stream.followsLive { stream.pauseLiveActivity() } else { stream.returnToLatest() }
+    }
+    @objc private func findInActivity() { onFocus?(); stream.find() }
+    @objc private func askAboutSelection() { stream.askAboutSelection() }
+    @objc private func largerText() { stream.changeFont(1) }
+    @objc private func smallerText() { stream.changeFont(-1) }
+    @objc private func actualTextSize() { stream.resetFont() }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        let next = PaneDensity.resolve(size: view.bounds.size, current: density)
+        guard next != density else { return }
+        setDensity(next)
+    }
+
+    /// Compact the chrome and scale the text for the room this pane has.
+    func setDensity(_ value: PaneDensity) {
+        loadViewIfNeeded()
+        guard value != density else { return }
+        let previous = density
+        density = value
+        let compact = value.hasCompactChrome
+        for button in [splitButton, stackButton] { button.imagePosition = compact ? .imageOnly : .imageLeading }
+        let tiny = value.width == .tiny
+        let widths: [CGFloat] = compact ? [tiny ? 28 : 32, 30, 30, tiny ? 26 : 30] : [36, 72, 72, 30]
+        for (constraint, width) in zip(paneButtonWidths, widths) { constraint.constant = width }
+        tabActions.spacing = tiny ? 4 : 8
+        edgeInsets[0].constant = value.edgeInset; edgeInsets[1].constant = -value.edgeInset
+        let composerInset = tiny ? 6 : PaneSpacing.composerInset
+        composerInsets[0].constant = composerInset; composerInsets[1].constant = -composerInset
+        applyComposerMetrics()
+        if value.isShort != previous.isShort { applyConversationVisibility() }
+        if value.textScale != previous.textScale || compact != previous.hasCompactChrome {
+            stream.setDensity(value)
+            conversation.textScale = value.textScale
+        }
+        view.needsLayout = true
+    }
+
+    private var composerPointSize: CGFloat {
+        max(10, (Typography.conversation.pointSize * density.textScale).rounded())
+    }
+    private func applyComposerMetrics() {
+        let size = composerPointSize
+        prompt.font = InterfaceStyle.isMatrix ? Typography.prose(ofSize: size) : .systemFont(ofSize: size)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.minimumLineHeight = size * 1.5
+        prompt.defaultParagraphStyle = paragraph
+        prompt.typingAttributes[.paragraphStyle] = paragraph
+        if let storage = prompt.textStorage, storage.length > 0 {
+            storage.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: storage.length))
+        }
+        prompt.textContainerInset = density.width == .tiny ? NSSize(width: 8, height: 6) : NSSize(width: 12, height: 10)
+        cardHeight.constant = composerHeight(hasAttachments: !attachments.isEmpty)
+    }
+    private func composerHeight(hasAttachments: Bool) -> CGFloat {
+        let base: CGFloat = density.isShort || density.width == .tiny ? 92 : 120
+        return base + (hasAttachments ? 86 : 0)
+    }
+    /// A short pane keeps the full activity stream and the composer; the
+    /// readable conversation returns as soon as there is height for both.
+    private func applyConversationVisibility() {
+        let hidden = density.isShort
+        conversation.isHidden = hidden; conversationDivider.isHidden = hidden; conversationHandle.isHidden = hidden
+        if hidden {
+            conversationHeight.isActive = false; conversationMinimum.isActive = false
+            conversationCollapsed.isActive = true
+        } else {
+            conversationCollapsed.isActive = false
+            conversationMinimum.isActive = true; conversationHeight.isActive = true
+        }
+        conversationGap.constant = hidden ? 0 : -PaneSpacing.gap
+    }
 
     private func makeConversationHeight(_ fraction: CGFloat) -> NSLayoutConstraint {
         let constraint = conversation.heightAnchor.constraint(equalTo: view.heightAnchor, multiplier: fraction)
@@ -410,7 +696,7 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
         conversationFraction = value
         conversationHeight.isActive = false
         conversationHeight = makeConversationHeight(value)
-        conversationHeight.isActive = true
+        conversationHeight.isActive = !density.isShort
         view.needsLayout = true
         // Track the pointer in this event, including when the next drag arrives
         // before AppKit's next layout pass.
@@ -433,8 +719,8 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
         loadViewIfNeeded()
         splitButton.isEnabled = split
         stackButton.isEnabled = stack
-        splitButton.toolTip = split ? "Add a pane to the right" : "No room for another pane (maximum 12 columns)"
-        stackButton.toolTip = stack ? "Add a pane below" : "No room for another pane (maximum 6 rows)"
+        splitButton.toolTip = "Add a pane to the right. Panes scroll sideways once ten are across."
+        stackButton.toolTip = "Add a pane below"
     }
 
     func updateFocusAppearance(active: Bool) {
@@ -452,7 +738,8 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
     func applyInterfaceStyle() {
         loadViewIfNeeded()
         (view as? PaneSurface)?.applyInterfaceStyle()
-        prompt.font = InterfaceStyle.isMatrix ? Typography.prose(ofSize: Typography.conversation.pointSize) : Typography.conversation
+        applyChrome()
+        applyComposerMetrics()
         prompt.insertionPointColor = InterfaceStyle.isMatrix ? FeedPalette.green : .textColor
         updateFocusAppearance(active: isActivePane)
         stream.applyInterfaceStyle()
@@ -461,9 +748,11 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
 
     func updateTabs(_ chats: [(Int, Session)], isSplit: Bool) {
         loadViewIfNeeded()
+        shownTabs = chats; shownSplit = isSplit
         closePaneButton.isEnabled = isSplit
         for child in tabs.arrangedSubviews { tabs.removeArrangedSubview(child); child.removeFromSuperview() }
-        var width: CGFloat = 0
+        let breathe = InterfaceStyle.isBreathe
+        tabNaturalWidths = []; tabWidthConstraints = []; selectedTabPosition = nil
         var selectedItem: ChatTabItem?
         for (index, chat) in chats {
             let title = ChatTabTitle.display(chat.title)
@@ -473,12 +762,15 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
                                    onSelect: { [weak self] in self?.onSelectChat?(index) },
                                    onClose: { [weak self] in self?.onCloseChat?(index) })
             let titleWidth = (title as NSString).size(withAttributes: [.font: Typography.interfaceEmphasis]).width
-            let length = min(240, max(116, ceil(titleWidth) + 46 + (chat.turn == nil ? 0 : 13)))
-            tabs.addArrangedSubview(item); item.widthAnchor.constraint(equalToConstant: length).isActive = true; item.heightAnchor.constraint(equalToConstant: 38).isActive = true
-            if chat === session { selectedItem = item }
-            width += length + tabs.spacing
+            let running: CGFloat = chat.turn == nil ? 0 : 13
+            let length = breathe ? min(Breathe.tabMaximum, max(Breathe.tabMinimum + 12, ceil(titleWidth) + 42 + running))
+                : min(240, max(116, ceil(titleWidth) + 46 + running))
+            let width = item.widthAnchor.constraint(equalToConstant: length)
+            tabs.addArrangedSubview(item); width.isActive = true; item.heightAnchor.constraint(equalToConstant: 38).isActive = true
+            if chat === session { selectedItem = item; selectedTabPosition = tabNaturalWidths.count }
+            tabNaturalWidths.append(length); tabWidthConstraints.append(width)
         }
-        tabs.frame = NSRect(x: 0, y: 0, width: max(1, width - tabs.spacing), height: 38)
+        fitTabs(slidingSelection: true)
         if revealedSessionID != session?.id {
             // Reveal newly selected chats immediately, without moving the strip
             // on background status updates while the user browses other tabs.
@@ -506,6 +798,12 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
     func refresh() {
         sendButton.title = session?.turn == nil ? "Send  ↵" : "Steer  ↵"
         stopButton.isEnabled = session?.turn != nil
+        stopButton.isHidden = InterfaceStyle.isBreathe && session?.turn == nil
+        conversation.setWorking(session?.turn != nil) { [weak self] in
+            guard let self, self.session?.turn != nil else { return nil }
+            return ConversationWorkingIndicator.activity(after: self.stream.records)
+        }
+        stream.showRepository(of: session?.project)
         prompt.setAccessibilityLabel("Message \(session?.title ?? "this chat"). Enter to send or steer. Shift Enter for a new line.")
     }
     func setAttachments(_ values: [ChatAttachment], animated: Bool = false, from origin: NSPoint? = nil) {
@@ -525,7 +823,7 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
         let width = CGFloat(values.count) * 108 - (values.isEmpty ? 0 : 8)
         attachmentStrip.frame = NSRect(x: 0, y: 0, width: max(1, width), height: 80)
         attachmentHeight.constant = values.isEmpty ? 0 : 86
-        cardHeight.constant = values.isEmpty ? 120 : 206
+        cardHeight.constant = composerHeight(hasAttachments: !values.isEmpty)
         attachmentScroll.isHidden = values.isEmpty
         attachmentStatus.stringValue = values.isEmpty ? "" : "\(values.count) image\(values.count == 1 ? "" : "s") attached"
         attachmentStatus.textColor = .secondaryLabelColor

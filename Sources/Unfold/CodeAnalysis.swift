@@ -23,6 +23,7 @@ actor CodeAnalysisService {
         if request.language == "python" { return await PythonAnalysisService.shared.analyze(request.source) }
         if let cached = cache[request.key] { return cached }
         let result = Self.inspect(request)
+        guard request.source.utf8.count <= 262_144 else { return result }
         cache[request.key] = result; order.append(request.key)
         if order.count > 128 { cache.removeValue(forKey: order.removeFirst()) }
         return result

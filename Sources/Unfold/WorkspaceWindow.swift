@@ -19,6 +19,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private var columnStore: [UUID: ChatColumn] = [:]
     private var paneLayout: PaneLayout?
     private var layoutController: PaneLayoutController?
+    private let paneCanvas = PaneCanvasController()
     private(set) var layoutMode: WorkspaceLayoutMode = .panes
     private var secondaryColumn: ChatColumn? { columns.dropFirst().first }
     private var drafts: [UUID: String] = [:]
@@ -41,17 +42,26 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private var switchingProject = false
     private var activeColumnID: UUID? { didSet { refreshPaneFocus() } }
     private var splitResizeObserver: NSObjectProtocol?
-    private var updatingPaneWindowMinimum = false
     private var styleObserver: NSObjectProtocol?
     private var offlineIndicator: OfflineWindowIndicator?
+    private let localModels: LocalModelRegistry
+    private var localObservers: [NSObjectProtocol] = []
     private var prompt: ComposerTextView { primaryColumn.prompt }
     private let heading = NSTextField(labelWithString: "ThoughtStream")
     private let loginButton = NSButton(title: "Connect ChatGPT", target: nil, action: nil)
+    private let settingsButton = NSButton(title: "Settings", target: nil, action: nil)
+    private var settingsWidth: NSLayoutConstraint?
+    private var settingsHeight: NSLayoutConstraint?
+    private var headerRow: NSStackView?
+    private var headerHeight: NSLayoutConstraint?
+    private var titlebarControls: NSTitlebarAccessoryViewController?
+    private let bodySurface = WorkspaceSurface()
     private let claudeConnectButton = NSButton(title: "Connect Claude", target: nil, action: nil)
     private let claudeAccountStatus = NSTextField(wrappingLabelWithString: "Use your Claude Code sign-in on this Mac.")
     private var claudeSignInTask: Task<Void, Never>?
     private let activity = NSProgressIndicator()
     private var activityTimer: Timer?
+    private var historyCacheTimer: Timer?
     private var startedAt: Date?
     private let providerPicker = NSPopUpButton()
     private let modelCatalog: ModelCatalog
@@ -90,9 +100,11 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private var activeInput: (request: PendingInput, alert: NSAlert)?
     private var session: Session? { selected.flatMap { sessions.indices.contains($0) ? sessions[$0] : nil } }
 
-    init(restoredSessions: [Session]? = nil, stateStore: WorkspaceStateStore? = nil, history: ProjectHistory? = nil, modelCatalog: ModelCatalog? = nil) {
+    init(restoredSessions: [Session]? = nil, stateStore: WorkspaceStateStore? = nil, history: ProjectHistory? = nil, modelCatalog: ModelCatalog? = nil,
+         localModels: LocalModelRegistry? = nil) {
         self.modelCatalog = modelCatalog ?? ModelCatalog(defaults: restoredSessions == nil ? .standard : nil)
         automaticallyDiscoverModels = restoredSessions == nil
+        self.localModels = localModels ?? .shared
         self.stateStore = stateStore ?? WorkspaceStateStore()
         projectHistory = history
         historyEnabled = restoredSessions == nil || history != nil
@@ -148,9 +160,16 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             Task { @MainActor in self?.applyInterfaceStyle() }
         }
         restoringWorkspace = false
+        observeLocalModels()
         for session in sessions { configureQueue(for: session) }
         // Reattach to existing work without adding messages to the conversation.
         for session in sessions { session.reconnectAfterRestart() }
+        historyCacheTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, !self.stopped else { return }
+                SessionHistoryCache.trim(self.sessions)
+            }
+        }
         refreshNavigation()
         for project in projects where projectStates[project.path]?.historyExpanded == true { discoverHistory(in: project.path) }
     }
@@ -158,7 +177,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
 
     private func build() {
         let outer = NSSplitViewController(); outer.splitView.isVertical = true; outer.splitView.dividerStyle = .thin
-        let rail = NSViewController(); rail.view = WorkspaceSurface(fill: FeedPalette.sidebar)
+        let rail = NSViewController(); rail.view = WorkspaceSurface(fill: FeedPalette.backdrop)
         let new = NSButton(title: "", target: self, action: #selector(newChat(_:)))
         new.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: nil)
         new.imagePosition = .imageOnly; new.isBordered = false
@@ -253,10 +272,11 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         sidebarItem.holdingPriority = NSLayoutConstraint.Priority(260)
         sidebarItem.canCollapse = false
         outer.addSplitViewItem(sidebarItem)
-        let body = NSViewController(); body.view = WorkspaceSurface()
+        let body = NSViewController(); body.view = bodySurface
         heading.font = .systemFont(ofSize: 17, weight: .semibold); heading.lineBreakMode = .byTruncatingTail
         loginButton.target = self; loginButton.action = #selector(signIn(_:))
-        let settings = NSButton(title: "Settings", target: self, action: #selector(showSettings(_:)))
+        let settings = settingsButton
+        settings.target = self; settings.action = #selector(showSettings(_:))
         settings.bezelStyle = .rounded
         settings.controlSize = .regular
         settings.font = .systemFont(ofSize: 13, weight: .medium)
@@ -265,10 +285,14 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         settings.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         settings.imagePosition = .imageLeading
         settings.image = settings.image?.withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
-        settings.widthAnchor.constraint(equalToConstant: 110).isActive = true
-        settings.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        settingsWidth = settings.widthAnchor.constraint(equalToConstant: 110)
+        settingsWidth?.isActive = true
+        settingsHeight = settings.heightAnchor.constraint(equalToConstant: 32)
+        settingsHeight?.isActive = true
         let header = NSStackView(views: [activity, NSView(), settings]); header.orientation = .horizontal; header.spacing = 10
         header.alignment = .centerY
+        headerRow = header
+        headerHeight = header.heightAnchor.constraint(equalToConstant: 40)
         status.font = .systemFont(ofSize: 12); status.textColor = .secondaryLabelColor; status.lineBreakMode = .byTruncatingMiddle
         activity.style = .spinning; activity.controlSize = .small; activity.isDisplayedWhenStopped = false
         streamSplit.splitView.isVertical = true; streamSplit.splitView.dividerStyle = .thin; body.addChild(streamSplit)
@@ -304,10 +328,52 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         }
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: body.view.safeAreaLayoutGuide.topAnchor, constant: 2),
-            header.leadingAnchor.constraint(equalTo: body.view.leadingAnchor, constant: 18), header.trailingAnchor.constraint(equalTo: body.view.trailingAnchor, constant: -18), header.heightAnchor.constraint(equalToConstant: 40),
+            header.leadingAnchor.constraint(equalTo: body.view.leadingAnchor, constant: 18), header.trailingAnchor.constraint(equalTo: body.view.trailingAnchor, constant: -18), headerHeight!,
             tabSplitHost.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 2), tabSplitHost.leadingAnchor.constraint(equalTo: body.view.leadingAnchor), tabSplitHost.trailingAnchor.constraint(equalTo: body.view.trailingAnchor), tabSplitHost.bottomAnchor.constraint(equalTo: body.view.bottomAnchor)
         ])
         outer.addSplitViewItem(NSSplitViewItem(viewController: body)); window?.contentViewController = outer
+        applyHeaderStyle()
+    }
+    /// Breathe keeps Settings as a quiet gear and gives the header strip to
+    /// the panes: the gear and the activity spinner ride in the title bar.
+    /// The Settings menu item and ⌘, are unchanged.
+    private func applyHeaderStyle() {
+        let quiet = InterfaceStyle.isBreathe
+        settingsButton.imagePosition = quiet ? .imageOnly : .imageLeading
+        settingsButton.isBordered = !quiet
+        settingsButton.contentTintColor = quiet ? FeedPalette.muted : FeedPalette.text
+        settingsButton.setAccessibilityLabel("Settings")
+        settingsWidth?.constant = quiet ? 28 : 110
+        settingsHeight?.constant = quiet ? 24 : 32
+        // The body joins the backdrop the pane cards float on.
+        bodySurface.fill = quiet ? FeedPalette.backdrop : FeedPalette.canvas
+        guard let window, let header = headerRow else { return }
+        if quiet, titlebarControls == nil {
+            for view in [activity, settingsButton] { header.removeArrangedSubview(view); view.removeFromSuperview() }
+            let controls = NSStackView(views: [activity, settingsButton])
+            controls.orientation = .horizontal; controls.alignment = .centerY; controls.spacing = 8
+            controls.translatesAutoresizingMaskIntoConstraints = false
+            let holder = NSView(frame: NSRect(x: 0, y: 0, width: 72, height: 28))
+            holder.addSubview(controls)
+            NSLayoutConstraint.activate([
+                controls.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: -12),
+                controls.centerYAnchor.constraint(equalTo: holder.centerYAnchor)
+            ])
+            let accessory = NSTitlebarAccessoryViewController()
+            accessory.view = holder
+            accessory.layoutAttribute = .trailing
+            window.addTitlebarAccessoryViewController(accessory)
+            titlebarControls = accessory
+            header.isHidden = true; headerHeight?.constant = 0
+        } else if !quiet, let accessory = titlebarControls {
+            if let index = window.titlebarAccessoryViewControllers.firstIndex(of: accessory) {
+                window.removeTitlebarAccessoryViewController(at: index)
+            }
+            titlebarControls = nil
+            for view in [activity, settingsButton] { view.removeFromSuperview() }
+            header.insertArrangedSubview(activity, at: 0); header.addArrangedSubview(settingsButton)
+            header.isHidden = false; headerHeight?.constant = 40
+        }
     }
     private func openSearchResult(_ result: LocalHistorySearch.Result) {
         searchOpenTask?.cancel()
@@ -346,7 +412,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         providerPicker.selectItem(at: AgentProvider.allCases.firstIndex(of: currentProvider) ?? 0)
         providerPicker.target = self; providerPicker.action = #selector(providerSelected)
         providerPicker.setAccessibilityLabel("Agent provider")
-        providerPicker.toolTip = "Choose Codex or Claude Code. Existing conversations keep their provider."
+        providerPicker.toolTip = "Choose Codex, Claude Code or a model running on this Mac. Existing conversations keep their provider."
         model.addItem(withTitle: initial.displayName); model.lastItem?.representedObject = initial.model
         model.target = self; model.action = #selector(modelSelected)
         model.menu?.delegate = self
@@ -445,9 +511,18 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         }
         if let item = self.model.itemArray.first(where: { $0.representedObject as? String == current.model }) {
             self.model.select(item)
+        } else if current.model.isEmpty {
+            // Only a local chat can have no model yet: it takes the first one found.
+            let entry = NSMenuItem(title: list.isEmpty ? "No local models found" : "First available model", action: nil, keyEquivalent: "")
+            entry.representedObject = ""
+            entry.isEnabled = !list.isEmpty
+            self.model.menu?.insertItem(entry, at: 0)
+            self.model.select(entry)
         } else {
             // Keep the explicit selection; an unavailable model must report an error, never silently fall back.
-            let entry = NSMenuItem(title: current.displayName, action: nil, keyEquivalent: "")
+            let record = InferenceSettings.modelRecord(for: current.model, in: list)
+            let title = (record?["displayName"] as? String).map { "\($0) (\(current.model))" } ?? current.displayName
+            let entry = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             entry.representedObject = current.model
             self.model.menu?.addItem(entry)
             self.model.select(entry)
@@ -473,40 +548,50 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private func renderLayout() {
         guard let paneLayout else { return }
         for column in columns { column.view.removeFromSuperview(); column.removeFromParent() }
-        for item in streamSplit.splitViewItems { streamSplit.removeSplitViewItem(item) }
+        // The pane canvas stays in the window across layout changes. Laying a
+        // tree out while detached is far slower, and it keeps its scroll position.
+        let showsCanvas = streamSplit.splitViewItems.count == 1 && streamSplit.splitViewItems[0].viewController === paneCanvas
+        if layoutMode == .tabs || !showsCanvas {
+            for item in streamSplit.splitViewItems { streamSplit.removeSplitViewItem(item) }
+        }
         if layoutMode == .tabs {
             layoutController = nil
+            paneCanvas.setLayout(nil)
             streamSplit.addSplitViewItem(NSSplitViewItem(viewController: primaryColumn))
-            if let window {
-                let frame = window.frame
-                window.minSize = NSSize(width: 860, height: 600)
-                if window.frame != frame { window.setFrame(frame, display: false) }
-            }
             window?.contentView?.layoutSubtreeIfNeeded()
             refreshPaneFocus()
             return
         }
         let controller = PaneLayoutController(layout: paneLayout, columns: columnStore, configureHost: { [weak self] host, column in
-            host.validate = { [weak self, weak column] payload, side in
-                guard let column else { return false }
-                return self?.canDropTab(payload, on: side, in: column) == true
-            }
-            host.onDrop = { [weak self, weak column] payload, side in
-                guard let column else { return false }
-                return self?.dropTab(payload, on: side, in: column) == true
-            }
+            self?.configurePaneHost(host, column)
         }, resized: { [weak self] in
             self?.updateSplitAvailability()
             self?.scheduleStateSave()
         })
+        // The canvas keeps its scroll position while the pane tree is swapped.
+        // The window never grows to fit panes: they compact, then the area scrolls.
+        let topologyChanged = layoutController != nil
         layoutController = controller
-        streamSplit.addSplitViewItem(NSSplitViewItem(viewController: controller))
+        if !showsCanvas { streamSplit.addSplitViewItem(NSSplitViewItem(viewController: paneCanvas)) }
+        paneCanvas.setLayout(controller, animated: topologyChanged)
         window?.contentView?.layoutSubtreeIfNeeded()
-        controller.restoreFractions()
-        // Pane count/style determines the minimum. Recomputing it during a
-        // window resize reads transient view sizes and feeds back into resizing.
-        updatePaneWindowMinimum()
+        paneCanvas.fit()
         refreshPaneFocus()
+    }
+    private func configurePaneHost(_ host: TabSplitHostView, _ column: ChatColumn) {
+        host.validate = { [weak self, weak column] payload, side in
+            guard let column else { return false }
+            return self?.canDropTab(payload, on: side, in: column) == true
+        }
+        host.onDrop = { [weak self, weak column] payload, side in
+            guard let column else { return false }
+            return self?.dropTab(payload, on: side, in: column) == true
+        }
+    }
+    /// True while the pane tree on screen can be changed in place.
+    private var showsPaneCanvas: Bool {
+        layoutMode == .panes && layoutController != nil && paneCanvas.layout === layoutController
+            && streamSplit.splitViewItems.count == 1 && streamSplit.splitViewItems[0].viewController === paneCanvas
     }
     private var projects: [URL] {
         var activity: [String: (project: URL, working: Bool, latest: Date)] = [:]
@@ -567,6 +652,10 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             }
             self.scheduleStateSave()
         }
+        column.onAnswerLocally = { [weak self, weak column] message in
+            guard let self, let column, let source = column.session else { return }
+            self.answerQueuedChatLocally(message, from: source, in: column)
+        }
         column.onFocus = { [weak self, weak column] in
             guard let self, let column else { return }
             self.activeColumnID = column.columnID
@@ -609,6 +698,11 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         guard let remaining = paneLayout?.removing(column.columnID) else { return }
         rememberDraft(column)
         column.session?.detach(column.stream)
+        if InterfaceStyle.isBreathe, showsPaneCanvas {
+            // The closing pane fades where it stood while the others take over.
+            Breathe.popClosed(column.view, over: paneCanvas.view)
+            paneCanvas.softenTopologyChange(duration: 0.2)
+        }
         column.view.removeFromSuperview(); column.removeFromParent()
         columnStore.removeValue(forKey: column.columnID)
         paneLayout = remaining
@@ -618,10 +712,16 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             (balanceTarget.flatMap { columnStore[$0.paneID] } ?? primaryColumn)
         activeColumnID = nextFocus.columnID
         activePane = nextFocus.stream
-        renderLayout()
+        // Take the pane out in place when possible: the others keep their layout.
+        if showsPaneCanvas, layoutController?.removePane(column.columnID) == true {
+            window?.contentView?.layoutSubtreeIfNeeded()
+            paneCanvas.fit()
+            refreshPaneFocus()
+        } else { renderLayout() }
         layoutController?.balance()
         paneLayout = layoutController?.snapshot ?? paneLayout
         refreshNavigation()
+        revealPane(nextFocus, animated: false)
         window?.makeFirstResponder(nextFocus.prompt)
     }
     @objc func closeFocusedPane(_ sender: Any?) { closePane(focusedColumn) }
@@ -646,7 +746,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     func refreshLayoutMenu() {
         let paneActions: [Selector] = [#selector(splitStream(_:)), #selector(stackStream(_:)),
             #selector(focusPreviousPane(_:)), #selector(focusNextPane(_:)),
-            #selector(closeFocusedPane(_:)), #selector(singlePane(_:))]
+            #selector(closeFocusedPane(_:)), #selector(singlePane(_:)),
+            #selector(arrangePanes(_:)), #selector(balancePanes(_:))]
         func update(_ menu: NSMenu) {
             for item in menu.items {
                 if let action = item.action, paneActions.contains(action) {
@@ -654,7 +755,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                     item.isHidden = layoutMode == .tabs || alias
                     item.allowsKeyEquivalentWhenHidden = layoutMode == .panes && alias
                 }
-                if item.identifier?.rawValue == "paneCommandsSeparator" { item.isHidden = layoutMode == .tabs }
+                if ["paneCommandsSeparator", "paneArrangeMenu"].contains(item.identifier?.rawValue ?? "") { item.isHidden = layoutMode == .tabs }
                 if item.action == #selector(selectPreviousTab(_:)) {
                     item.title = layoutMode == .tabs ? "Previous Tab" : "Previous Chat or Pane"
                 } else if item.action == #selector(selectNextTab(_:)) {
@@ -707,6 +808,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         column.tabIDs.compactMap { id in sessions.firstIndex { $0.id == id && $0.project.path == projectSelection } }
     }
     private func refreshNavigation() {
+        SessionHistoryCache.trim(sessions)
         let started = sessions.filter(\.hasStartedConversation).map(\.id)
         let existing = Set(sidebarConversationOrder)
         let newChats = started.filter { !existing.contains($0) }
@@ -718,6 +820,9 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             let visibleSessions = sessions.filter { visible.contains($0.id) }
             threadSummaries.schedule(visibleSessions, generate: { [weak self] session, input in
                 guard let self else { throw CancellationError() }
+                if session.provider == .local {
+                    return try await ChatThreadSummary.generateLocally(input: input, model: session.inferenceSettings.model, registry: self.localModels)
+                }
                 let executable = try session.provider == .claude ? ClaudeConnection.executable() : self.executable(allowPrompt: false)
                 return try await ChatThreadSummary.generate(input: input, provider: session.provider,
                                                             model: session.inferenceSettings.model, executable: executable)
@@ -778,7 +883,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             restoreStreamState(in: target)
         }
         if target === primaryColumn { selected = index }
-        if layoutMode == .tabs ? primaryColumn.parent == nil : layoutController?.parent == nil { renderLayout() }
+        if layoutMode == .tabs ? primaryColumn.parent == nil : (layoutController == nil || paneCanvas.parent == nil) { renderLayout() }
         activePane = target.stream
         activeColumnID = target.columnID
         window?.title = s.title
@@ -818,6 +923,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         if let index = target.index { select(index, in: target.column) }
         activeColumnID = target.column.columnID
         activePane = target.column.stream
+        revealPane(target.column)
         window?.makeFirstResponder(target.column.prompt)
         refreshProviderControls()
         scheduleStateSave()
@@ -969,6 +1075,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             column.view.removeFromSuperview(); column.removeFromParent()
         }
         layoutController = nil
+        paneCanvas.setLayout(nil)
         primaryColumn = ChatColumn(tabsOnly: layoutMode == .tabs); configure(primaryColumn)
         columnStore = [primaryColumn.columnID: primaryColumn]
         paneLayout = .pane(primaryColumn.columnID)
@@ -1030,6 +1137,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         selected = primaryColumn.session.flatMap { current in sessions.firstIndex { $0 === current } }
         for column in columns { restoreStreamState(in: column) }
         let focused = state.focusedPane.flatMap { columnStore[$0] } ?? (state.focusedSecondary ? secondaryColumn : nil) ?? primaryColumn
+        revealPane(focused, animated: false)
         activeColumnID = focused.columnID
         activePane = focused.stream; refreshProviderControls(); window?.makeFirstResponder(focused.prompt)
         window?.title = session?.title ?? "ThoughtStream"
@@ -1130,8 +1238,10 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     }
     private func refreshModelsIfNeeded() {
         let provider = currentProvider
-        guard automaticallyDiscoverModels, modelCatalog.needsRefresh(for: provider),
-              Date().timeIntervalSince(modelRefreshAttempts[provider] ?? .distantPast) > 60 else { return }
+        // Local runtimes start and stop at will, and asking them is nearly free.
+        let stale = provider == .local ? true : modelCatalog.needsRefresh(for: provider)
+        guard automaticallyDiscoverModels, stale,
+              Date().timeIntervalSince(modelRefreshAttempts[provider] ?? .distantPast) > (provider == .local ? 4 : 60) else { return }
         refreshModels(for: provider, showError: false)
     }
     @objc private func refreshModelsSelected() { refreshModels(for: currentProvider, showError: true) }
@@ -1147,6 +1257,17 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                 }
             }
             do {
+                if provider == .local {
+                    await self.localModels.refresh()
+                    guard !self.stopped else { return }
+                    self.modelCatalog.update(self.localModels.records, for: .local)
+                    if showError, self.localModels.models.isEmpty {
+                        throw CodexConnection.error(self.localModels.statuses.contains(where: \.isRunning)
+                            ? "A local runtime is running, but it has no chat models yet. Download one in Ollama, LM Studio or Jan."
+                            : "No local model runtime is answering on this Mac. Start Ollama, LM Studio or Jan (Settings → Local Models can start one for you).")
+                    }
+                    return
+                }
                 let executable = try provider == .claude ? ClaudeConnection.executable() : self.executable(allowPrompt: false)
                 let list = try await ProviderModelDiscovery.models(for: provider, executable: executable)
                 try Task.checkCancellation()
@@ -1173,7 +1294,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         alert.informativeText = "Enter the model ID supplied by your provider. It will be saved in this provider’s model list."
         alert.addButton(withTitle: "Add Model"); alert.addButton(withTitle: "Cancel")
         let id = NSTextField(), name = NSTextField()
-        id.placeholderString = provider == .claude ? "claude-fable-5-2" : "Model ID"
+        id.placeholderString = provider == .claude ? "claude-fable-5-2" : provider == .local ? "ollama|llama3.2" : "Model ID"
         id.setAccessibilityLabel("Model ID"); name.setAccessibilityLabel("Display name (optional)")
         let fields = NSStackView(views: [NSTextField(labelWithString: "Model ID"), id, NSTextField(labelWithString: "Display name (optional)"), name])
         fields.orientation = .vertical; fields.alignment = .leading; fields.spacing = 8
@@ -1199,24 +1320,28 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         let id = try modelCatalog.add(id: id, name: name, for: provider)
         var settings = currentInferenceSettings
         settings.model = id
+        settings = settings.resolvingEffort(in: modelCatalog.models(for: provider))
         if provider == .codex { settings = settings.resolvingCodexTier(in: modelCatalog.models(for: provider)) }
-        else if !InferenceSettings.supportsClaudeFastMode(id) { settings.tier = "default" }
+        else if !InferenceSettings.supportsClaudeFastMode(id, in: modelCatalog.models(for: provider)) { settings.tier = "default" }
         inferenceSession?.setInferenceSettings(settings)
         settings.save(provider: provider)
         refreshProviderControls()
     }
     @objc private func modelSelected() {
-        guard model.selectedItem?.representedObject is String else { refreshProviderControls(); return }
+        guard let selected = model.selectedItem?.representedObject as? String else { refreshProviderControls(); return }
         let tier = speed.selectedItem?.representedObject as? String ?? "default"
-        refreshEfforts(preferred: currentInferenceSettings.effort)
+        var settings = currentInferenceSettings
+        settings.model = selected
+        refreshEfforts(preferred: settings.resolvingEffort(in: models).effort)
         refreshSpeeds(preferred: tier)
         settingsChanged()
     }
     private func refreshSpeeds(preferred: String) {
         let provider = currentProvider
         let selectedModel = model.selectedItem?.representedObject as? String ?? ""
-        let supportsFast = provider != .claude || InferenceSettings.supportsClaudeFastMode(selectedModel)
-        speed.isHidden = false
+        let supportsFast = provider != .claude || InferenceSettings.supportsClaudeFastMode(selectedModel, in: models)
+        // A local model has one speed: this Mac's.
+        speed.isHidden = provider == .local
         speed.removeAllItems()
         speed.autoenablesItems = false
         // Keep speed choices discoverable; sending checks runtime availability.
@@ -1230,17 +1355,24 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         let selected = speed.itemArray.first { $0.representedObject as? String == requested && $0.isEnabled }
         speed.select(selected ?? speed.itemArray.first)
         speed.toolTip = provider == .claude
-            ? "Fast mode requires a supported Opus model and usage credits. Applies to the next turn."
+            ? "Fast mode requires a supported Claude model and usage credits. Applies to the next turn."
             : "Faster tiers can use more of your allowance. Availability is checked when you send; unavailable speeds fall back to Fast or Standard."
     }
     private func refreshEfforts(preferred: String) {
-        let selectedModel = model.selectedItem?.representedObject as? String
-        let record = models.first { ($0["model"] as? String ?? $0["id"] as? String) == selectedModel }
+        let selectedModel = model.selectedItem?.representedObject as? String ?? ""
+        let record = InferenceSettings.modelRecord(for: selectedModel, in: models)
         var values = (record?["supportedReasoningEfforts"] as? [[String: Any]] ?? []).compactMap { $0["reasoningEffort"] as? String }
         if values.isEmpty { values = currentProvider == .claude ? InferenceSettings.claudeEfforts : [preferred] }
+        // Passive discovery must not change a conversation's saved effort.
+        // Explicit model changes resolve against capabilities before reaching here.
+        let missingSelection = !values.contains(preferred)
+        if missingSelection { values.append(preferred) }
         effort.removeAllItems(); effort.addItems(withTitles: values)
-        if values.contains(preferred) { effort.selectItem(withTitle: preferred) }
-        else if let value = record?["defaultReasoningEffort"] as? String { effort.selectItem(withTitle: value) }
+        effort.selectItem(withTitle: preferred)
+        effort.isHidden = currentProvider == .local
+        effort.toolTip = missingSelection
+            ? "Your saved effort is \(preferred). The latest model list doesn’t advertise it; choose another effort if the provider rejects it."
+            : "Reasoning effort"
     }
     @objc private func settingsChanged() {
         let settings = chosenSettings
@@ -1267,7 +1399,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                     .snapshot: #selector(showProtocol(_:)), .export: #selector(exportLog(_:))
                 ],
                 chatGPTButton: loginButton, claudeButton: claudeConnectButton,
-                claudeStatus: claudeAccountStatus)
+                claudeStatus: claudeAccountStatus, localModels: localModels)
+            settingsController?.scansLocalModelsWhenShown = automaticallyDiscoverModels
         }
         settingsController?.setTabsOnly(layoutMode == .tabs)
         settingsController?.showWindow(sender)
@@ -1329,6 +1462,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private func configureQueue(for session: Session) {
         session.configureMessageQueue { [weak self, weak session] in
             guard let self, let session else { throw CancellationError() }
+            // A local model needs no executable, sign-in or Internet.
+            if session.provider == .local { try await session.connectLocal(); return }
             let executable = try session.provider == .claude ? ClaudeConnection.executable() : self.executable(allowPrompt: false)
             try await session.connect(executable)
             guard try await session.isAuthenticated() else {
@@ -1336,6 +1471,81 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             }
         }
     }
+    // MARK: Local models
+
+    private func observeLocalModels() {
+        let center = NotificationCenter.default
+        localObservers.append(center.addObserver(forName: .localModelsDidChange, object: localModels, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.localModelsChanged() }
+        })
+        localObservers.append(center.addObserver(forName: .connectivityDidChange, object: ConnectivityMonitor.shared, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, !self.stopped else { return }
+                // Find out what can answer here before the next message needs it.
+                if ConnectivityMonitor.shared.isOffline, self.automaticallyDiscoverModels { Task { await self.localModels.refresh() } }
+                self.refreshLocalFallbackOffer()
+            }
+        })
+        guard automaticallyDiscoverModels else { return }
+        Task { [weak self] in await self?.localModels.refresh() }
+    }
+
+    private func localModelsChanged() {
+        guard !stopped else { return }
+        modelCatalog.update(localModels.records, for: .local)
+        if currentProvider == .local { populateModelList(modelCatalog.models(for: .local)) }
+        refreshLocalFallbackOffer()
+    }
+
+    /// Waiting cloud messages offer a local answer only while it is real:
+    /// the Internet is away, the setting is on, and a model is here.
+    private func refreshLocalFallbackOffer() {
+        let offer = localModels.usesLocalModelsOffline && ConnectivityMonitor.shared.isOffline
+            ? localModels.preferredModel()?.name : nil
+        guard offer != QueuedChatPresentation.localModelName else { return }
+        QueuedChatPresentation.localModelName = offer
+        for column in columns where column.session?.outbox.pending != nil { column.conversation.rerender() }
+    }
+
+    /// A chat with nothing said and no cloud thread can simply become local.
+    private func canFallBackLocally(_ session: Session) -> Bool {
+        localModels.usesLocalModelsOffline && session.provider.needsInternet && ConnectivityMonitor.shared.isOffline
+            && !session.ready && !session.hasStartedConversation
+    }
+
+    /// A model that can answer now, starting an installed runtime if none is serving.
+    private func availableLocalModel(status: NSTextField? = nil) async -> LocalModel? {
+        if let model = localModels.preferredModel() { return model }
+        await localModels.refresh()
+        if let model = localModels.preferredModel() { return model }
+        for runtime in localModels.startableRuntimes() {
+            status?.stringValue = "Offline · starting \(runtime.name)…"
+            if await localModels.startRuntime(runtime), let model = localModels.preferredModel() { return model }
+        }
+        return nil
+    }
+
+    /// Move a message that is waiting for the cloud into a new local chat in
+    /// the same pane. The conversation so far goes with it as context; the
+    /// original chat keeps its history and loses only the waiting message.
+    private func answerQueuedChatLocally(_ id: UUID, from source: Session, in column: ChatColumn) {
+        run {
+            guard let model = await self.availableLocalModel(status: column.stream.status) else {
+                throw CodexConnection.error("No local model is available. Start Ollama, LM Studio or Jan and download a model, then try again.")
+            }
+            let context = source.history.filter { $0.queuedMessageID == nil }
+            guard let message = try source.withdrawQueuedChat(id) else { return }
+            let chat = Session(project: source.project, title: source.title == "New chat" ? "New chat" : source.title + " · local", provider: .local)
+            let settings = InferenceSettings(model: model.identifier, effort: "default", tier: "default")
+            chat.setInferenceSettings(settings)
+            chat.importSearchHistory(context)
+            self.sessions.append(chat)
+            self.select(self.sessions.count - 1, in: column)
+            try chat.enqueueChat(message.text, attachments: message.attachments, settings: settings)
+            self.refreshNavigation(); self.saveWorkspaceState()
+        }
+    }
+
     @objc func send(_ sender: Any?) { send(from: focusedColumn) }
     private func send(from column: ChatColumn) {
         let submittedText = column.prompt.string
@@ -1349,11 +1559,21 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         if !AccessMode.hasChosen { chooseAccess() }
         column.stream.resumeLiveActivity(animated: true)
         column.conversation.resumeLiveActivity(animated: true)
-        let settings = inferenceSession === s ? chosenSettings : s.inferenceSettings; settings.save(provider: s.provider)
+        var settings = inferenceSession === s ? chosenSettings : s.inferenceSettings
         column.sendButton.isEnabled = false
         column.stream.status.stringValue = s.ready ? "Sending…" : "Connecting to \(s.provider.label)…"
         run {
             defer { column.sendButton.isEnabled = true; column.refresh(); self.refreshNavigation() }
+            // No Internet and nothing said yet: let a model on this Mac answer
+            // now rather than leave a new chat waiting for the cloud.
+            if self.canFallBackLocally(s), let model = await self.availableLocalModel(status: column.stream.status) {
+                s.provider = .local
+                settings = InferenceSettings(model: model.identifier, effort: "default", tier: "default")
+                self.bind(s)
+                s.report(.system, "No Internet connection. \(model.name) is answering on this Mac. Turn this off in Settings → Local Models.")
+                if self.inferenceSession === s { self.refreshProviderControls() }
+            }
+            settings.save(provider: s.provider)
             self.configureQueue(for: s)
             try s.enqueueChat(submittedText, attachments: attachments, settings: settings)
             if self.drafts[s.id]?.trimmingCharacters(in: .whitespacesAndNewlines) == value { self.drafts[s.id] = "" }
@@ -1398,37 +1618,45 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         return canSplit(target ?? source, on: side)
     }
 
+    /// There is always room: panes compact, then the pane area scrolls.
     private func canSplit(_ column: ChatColumn, on side: TabSplitSide) -> Bool {
-        guard layoutMode == .panes, samplePane == nil, columns.contains(column) else { return false }
-        let layout = layoutController?.snapshot ?? paneLayout ?? .pane(column.columnID)
-        let minimum = columns.reduce(PaneLayout.minimumPaneSize) { size, pane in
-            let fitting = pane.view.fittingSize
-            return NSSize(width: max(size.width, ceil(fitting.width)), height: max(size.height, ceil(fitting.height)))
-        }
-        return layout.permitsSplit(of: column.columnID, vertical: side.vertical,
-                                   availableSize: streamSplit.view.bounds.size,
-                                   paneInset: InterfaceStyle.hasRoundedPanes ? PaneSurface.inset : 0,
-                                   paneMinimum: minimum)
+        layoutMode == .panes && samplePane == nil && columns.contains(column)
     }
 
-    private func updatePaneWindowMinimum() {
-        guard !updatingPaneWindowMinimum, let window, let layoutController else { return }
-        updatingPaneWindowMinimum = true
-        defer { updatingPaneWindowMinimum = false }
-        let minimum = layoutController.minimumSize
-        // Include the sidebar and header/titlebar around the actual pane area.
-        let chrome = NSSize(width: max(0, window.frame.width - streamSplit.view.bounds.width),
-                            height: max(0, window.frame.height - streamSplit.view.bounds.height))
-        let required = NSSize(width: max(860, ceil(minimum.width + chrome.width)),
-                              height: max(600, ceil(minimum.height + chrome.height)))
-        guard window.minSize != required else { return }
-        let frame = window.frame
-        window.minSize = required
-        // Updating content-derived limits can make AppKit refit the window.
-        // Keep its existing size unless the new pane minima require more room.
-        let preserved = NSRect(origin: frame.origin,
-            size: NSSize(width: max(frame.width, required.width), height: max(frame.height, required.height)))
-        if window.frame != preserved { window.setFrame(preserved, display: false) }
+    /// Scroll a pane into view after keyboard navigation or a layout change.
+    /// Never called for a click: the pane under the pointer must not move.
+    private func revealPane(_ column: ChatColumn, animated: Bool = true) {
+        guard layoutMode == .panes, layoutController != nil, column.isViewLoaded else { return }
+        paneCanvas.reveal(column.view, animated: animated)
+    }
+
+    @objc func arrangePanes(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let arrangement = PaneArrangement(rawValue: raw) else { return }
+        arrangePanes(as: arrangement)
+    }
+    /// Rebuild the pane tree as a tidy grid, row or column, keeping every
+    /// pane's tabs, draft and reading position.
+    func arrangePanes(as arrangement: PaneArrangement) {
+        guard layoutMode == .panes, samplePane == nil, columns.count > 1,
+              let arranged = PaneLayout.arranged(columns.map(\.columnID), as: arrangement, viewport: paneCanvas.viewport) else { return }
+        let focus = focusedColumn
+        columns.forEach(rememberDraft)
+        paneLayout = arranged
+        primaryColumn = columns[0]
+        selected = primaryColumn.session.flatMap { current in sessions.firstIndex { $0 === current } }
+        renderLayout()
+        layoutController?.balance()
+        paneLayout = layoutController?.snapshot ?? paneLayout
+        activeColumnID = focus.columnID; activePane = focus.stream
+        revealPane(focus, animated: false)
+        refreshNavigation(); saveWorkspaceState()
+        window?.makeFirstResponder(focus.prompt)
+    }
+    @objc func balancePanes(_ sender: Any?) {
+        guard layoutMode == .panes, columns.count > 1 else { return }
+        layoutController?.balance()
+        paneLayout = layoutController?.snapshot ?? paneLayout
+        scheduleStateSave()
     }
 
     private func updateSplitAvailability() {
@@ -1468,9 +1696,19 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         primaryColumn = columns[0]
         selected = primaryColumn.session.flatMap { current in sessions.firstIndex { $0 === current } }
         activeColumnID = new.columnID; activePane = new.stream
-        renderLayout()
+        if InterfaceStyle.isBreathe, showsPaneCanvas { paneCanvas.softenTopologyChange(duration: 0.2) }
+        // Add the pane in place when possible, so a workspace with many panes
+        // does not rebuild and re-lay-out every one of them for each split.
+        if showsPaneCanvas, layoutController?.insertPane(new, beside: column.columnID, vertical: side.vertical, leading: side.leading,
+                                                          configureHost: { [weak self] in self?.configurePaneHost($0, $1) }) == true {
+            window?.contentView?.layoutSubtreeIfNeeded()
+            paneCanvas.fit()
+            refreshPaneFocus()
+        } else { renderLayout() }
         layoutController?.balance()
         paneLayout = layoutController?.snapshot ?? paneLayout
+        revealPane(new)
+        Breathe.popOpen(new.view)
         window?.makeFirstResponder(new.prompt)
     }
     func splitPane(_ column: ChatColumn, side: TabSplitSide) {
@@ -1495,6 +1733,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         let target = panes[(index + offset + panes.count) % panes.count]
         activeColumnID = target.columnID
         activePane = target.stream
+        revealPane(target)
         window?.makeFirstResponder(target.prompt)
         refreshProviderControls()
         scheduleStateSave()
@@ -1534,6 +1773,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         if let window, !window.styleMask.contains(.fullScreen) { normalFrame = window.frame }
     }
     func windowDidResize(_ notification: Notification) {
+        if layoutController != nil { paneCanvas.fit() }
         layoutController?.restoreFractions()
         rememberNormalFrame(); updateSplitAvailability(); scheduleStateSave()
     }
@@ -1547,11 +1787,16 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         guard let window else { return }
         window.appearance = InterfaceStyle.current.appearance
         window.backgroundColor = FeedPalette.canvas
+        applyHeaderStyle()
+        for table in [conversationSidebar, projectHistoryTable] {
+            table.rowHeight = SidebarMetrics.rowHeight
+            table.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<table.numberOfRows))
+        }
         layoutController?.applyInterfaceStyle()
         for column in columns { column.applyInterfaceStyle() }
         window.contentView?.layoutSubtreeIfNeeded()
+        if layoutController != nil { paneCanvas.fit() }
         layoutController?.restoreFractions()
-        updatePaneWindowMinimum()
         updateSplitAvailability()
         func redraw(_ view: NSView) { view.needsDisplay = true; view.subviews.forEach(redraw) }
         if let content = window.contentView { redraw(content) }
@@ -1568,6 +1813,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         projectHistory?.stop()
         pendingStateSave?.cancel(); saveWorkspaceState(); stateStore.flush()
         if let splitResizeObserver { NotificationCenter.default.removeObserver(splitResizeObserver); self.splitResizeObserver = nil }
+        localObservers.forEach { NotificationCenter.default.removeObserver($0) }; localObservers.removeAll()
+        historyCacheTimer?.invalidate(); historyCacheTimer = nil
         activityTimer?.invalidate(); sampleTimer?.invalidate(); sessions.forEach { $0.stop() }
     }
 
@@ -1581,7 +1828,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         guard let request = inputQueue.first(where: { !deferredInputs.contains($0.key) }) else { return }
         let s = request.session, id = request.id, method = request.method, params = request.params
         let alert = NSAlert(); alert.messageText = "\(s.provider.label) needs your response"; alert.informativeText = "\(s.project.lastPathComponent) — \(s.title)\n\(method)\n\(params["reason"] as? String ?? "")"
-        let standard = ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "claude/tool/requestApproval"].contains(method)
+        let standard = ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "claude/tool/requestApproval", "local/tool/requestApproval"].contains(method)
         let field = NSTextView(frame: NSRect(x: 0, y: 0, width: 580, height: 210)); field.font = .monospacedSystemFont(ofSize: 11, weight: .regular); field.string = Session.pretty(params); field.isEditable = !standard
         let scroll = NSScrollView(frame: field.frame); scroll.documentView = field; scroll.hasVerticalScroller = true; alert.accessoryView = scroll
         if standard { alert.addButton(withTitle: "Deny"); alert.addButton(withTitle: "Approve this request") }
@@ -1696,8 +1943,9 @@ extension WorkspaceWindow: NSMenuItemValidation {
             return focusedColumn.session != nil
         case #selector(exportLog(_:)): return session != nil
         case #selector(closeFocusedPane(_:)), #selector(singlePane(_:)),
-             #selector(focusPreviousPane(_:)), #selector(focusNextPane(_:)):
-            return layoutMode == .panes && columns.count > 1
+             #selector(focusPreviousPane(_:)), #selector(focusNextPane(_:)),
+             #selector(arrangePanes(_:)), #selector(balancePanes(_:)):
+            return layoutMode == .panes && samplePane == nil && columns.count > 1
         case #selector(splitStream(_:)): return canSplit(focusedColumn, on: .right)
         case #selector(stackStream(_:)), #selector(splitBelow(_:)): return canSplit(focusedColumn, on: .bottom)
         case #selector(reopenClosedTab(_:)): return !closedTabs.isEmpty || !focusedColumn.closedTabIDs.isEmpty

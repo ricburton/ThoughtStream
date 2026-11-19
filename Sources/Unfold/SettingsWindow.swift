@@ -22,12 +22,13 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     }
 
     private enum Page: String, CaseIterable {
-        case general = "General", accounts = "Accounts", chat = "Chat", developer = "Developer"
+        case general = "General", accounts = "Accounts", localModels = "Local Models", chat = "Chat", developer = "Developer"
 
         var symbol: String {
             switch self {
             case .general: return "gearshape"
             case .accounts: return "person.crop.circle"
+            case .localModels: return "desktopcomputer"
             case .chat: return "bubble.left"
             case .developer: return "chevron.left.forwardslash.chevron.right"
             }
@@ -42,9 +43,18 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private var pageConstraints: [NSLayoutConstraint] = []
     private var paneLayoutSection: NSView?
     private var tabsOnlyNote: NSTextField?
+    private let localModels: LocalModelRegistry
+    private let localRuntimeRows = NSStackView()
+    private let localScanStatus = NSTextField(labelWithString: "")
+    private var localObserver: NSObjectProtocol?
+    private var localScan: Task<Void, Never>?
+    /// Set by the workspace. Off by default, so a bare settings window never
+    /// contacts a local server.
+    var scansLocalModelsWhenShown = false
 
     init(target: AnyObject, actions: [Action: Selector], chatGPTButton: NSButton,
-         claudeButton: NSButton, claudeStatus: NSTextField) {
+         claudeButton: NSButton, claudeStatus: NSTextField, localModels: LocalModelRegistry? = nil) {
+        self.localModels = localModels ?? .shared
         let panel = SettingsPanel(contentRect: NSRect(x: 0, y: 0, width: 840, height: 600),
                                   styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         panel.title = "Settings"
@@ -88,6 +98,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             ])
         ], note: "Choose a service in the main sidebar. Existing chats keep the service they started with.")
 
+        pages[.localModels] = makeLocalModelsPage()
+
         pages[.chat] = page([
             section("Current conversation", rows: [
                 row("Start a branch", detail: "Continue from this conversation in a new chat.", controls: [button(.fork)]),
@@ -112,6 +124,175 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    deinit { if let localObserver { NotificationCenter.default.removeObserver(localObserver) } }
+
+    // MARK: Local models
+
+    private func makeLocalModelsPage() -> NSStackView {
+        localRuntimeRows.orientation = .vertical
+        localRuntimeRows.alignment = .leading
+        localRuntimeRows.spacing = 0
+        let runtimes = SettingsGroupView()
+        localRuntimeRows.translatesAutoresizingMaskIntoConstraints = false
+        runtimes.addSubview(localRuntimeRows)
+        NSLayoutConstraint.activate([
+            localRuntimeRows.leadingAnchor.constraint(equalTo: runtimes.leadingAnchor, constant: 14),
+            localRuntimeRows.trailingAnchor.constraint(equalTo: runtimes.trailingAnchor, constant: -14),
+            localRuntimeRows.topAnchor.constraint(equalTo: runtimes.topAnchor, constant: 2),
+            localRuntimeRows.bottomAnchor.constraint(equalTo: runtimes.bottomAnchor, constant: -2)
+        ])
+        let heading = text("On this Mac")
+        heading.font = Typography.interfaceEmphasis
+        let rescan = NSButton(title: "Look Again", target: self, action: #selector(rescanLocalModels))
+        rescan.bezelStyle = .rounded; rescan.font = Typography.interface
+        localScanStatus.font = Typography.caption; localScanStatus.textColor = FeedPalette.muted
+        localScanStatus.lineBreakMode = .byTruncatingTail
+        let addServer = NSButton(title: "Add Server…", target: self, action: #selector(addLocalEndpoint))
+        addServer.bezelStyle = .rounded; addServer.font = Typography.interface
+        addServer.toolTip = "Add any OpenAI-compatible server by address, such as MLX or llama.cpp on this Mac or your network."
+        localScanStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let header = NSStackView(views: [heading, NSView(), localScanStatus, addServer, rescan])
+        header.orientation = .horizontal; header.alignment = .centerY; header.spacing = 10
+        let found = NSStackView(views: [header, runtimes])
+        found.orientation = .vertical; found.alignment = .leading; found.spacing = 10
+        header.widthAnchor.constraint(equalTo: found.widthAnchor).isActive = true
+        runtimes.widthAnchor.constraint(equalTo: found.widthAnchor).isActive = true
+
+        let fallback = NSSwitch()
+        fallback.state = localModels.usesLocalModelsOffline ? .on : .off
+        fallback.target = self; fallback.action = #selector(offlineFallbackChanged(_:))
+        fallback.setAccessibilityLabel("Use local models when offline")
+        let context = NSPopUpButton()
+        for length in LocalModelRegistry.contextLengths {
+            context.addItem(withTitle: "\(length / 1024)K tokens")
+            context.lastItem?.representedObject = length
+        }
+        context.selectItem(at: LocalModelRegistry.contextLengths.firstIndex(of: localModels.contextLength) ?? 2)
+        context.target = self; context.action = #selector(localContextChanged(_:))
+        context.font = Typography.interface
+        context.setAccessibilityLabel("Conversation memory for Ollama models")
+        let options = section("Behavior", rows: [
+            row("Use local models when offline",
+                detail: "With no Internet, a new chat is answered by a model on this Mac, and a waiting message can be moved to one.",
+                controls: [fallback]),
+            row("Conversation memory",
+                detail: "How much of a chat an Ollama model keeps in view. Larger uses more memory and is capped by each model.",
+                controls: [context])
+        ])
+        localObserver = NotificationCenter.default.addObserver(forName: .localModelsDidChange, object: localModels, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reloadLocalRuntimes() }
+        }
+        reloadLocalRuntimes()
+        return page([found, options], note: "Choose Local Model in the main sidebar to chat with one. Downloaded Ollama and LM Studio models load when needed; scanning does not load them into memory. Local models can run commands, edit files, open apps and run AppleScript on this Mac, asking first unless full access is on. Any number of panes can use them at once.")
+    }
+
+    private func reloadLocalRuntimes() {
+        for view in localRuntimeRows.arrangedSubviews { localRuntimeRows.removeArrangedSubview(view); view.removeFromSuperview() }
+        var rows: [NSView] = []
+        for (index, status) in localModels.statuses.enumerated() where status.isRunning || status.isInstalled || !status.models.isEmpty || status.runtime.key.hasPrefix("custom:") {
+            let detail: String
+            var controls: [NSView] = []
+            if status.isRunning {
+                let names = status.models.map(\.name)
+                detail = names.isEmpty ? "Running, but no chat models are downloaded yet."
+                    : "\(names.count) model\(names.count == 1 ? "" : "s"): " + names.prefix(6).joined(separator: ", ") + (names.count > 6 ? "…" : "")
+            } else if localModels.canStart(status.runtime) {
+                let names = status.models.map(\.name)
+                detail = names.isEmpty ? "Installed, not running. Starts automatically when needed."
+                    : "Downloaded · loads when needed: " + names.prefix(6).joined(separator: ", ") + (names.count > 6 ? "…" : "")
+                let start = NSButton(title: "Start", target: self, action: #selector(startLocalRuntime(_:)))
+                start.bezelStyle = .rounded; start.font = Typography.interface; start.tag = index
+                controls = [start]
+            } else if status.runtime.key.hasPrefix("custom:") {
+                detail = "Not answering at \(status.runtime.baseURL.absoluteString)."
+                let remove = NSButton(title: "Remove", target: self, action: #selector(removeLocalEndpoint(_:)))
+                remove.bezelStyle = .rounded; remove.font = Typography.interface; remove.tag = index
+                controls = [remove]
+            } else {
+                detail = status.isInstalled
+                    ? "Open \(status.runtime.name) and turn on its local server to use its models here."
+                    : "\(status.models.count) downloaded model(s) found. Install \(status.runtime.name) to use them."
+            }
+            rows.append(row(status.runtime.name, detail: detail, controls: controls))
+        }
+        if rows.isEmpty {
+            rows.append(row(localModels.lastRefresh == nil ? "Looking for local models…" : "No local model runtime found",
+                            detail: "ThoughtStream scans Ollama and LM Studio model folders and checks local servers including Jan and llama.cpp. Download a model in a supported runtime, then choose Look Again.",
+                            controls: []))
+        }
+        for (index, row) in rows.enumerated() {
+            if index > 0 {
+                let line = NSBox(); line.boxType = .separator
+                localRuntimeRows.addArrangedSubview(line)
+                line.widthAnchor.constraint(equalTo: localRuntimeRows.widthAnchor).isActive = true
+            }
+            localRuntimeRows.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: localRuntimeRows.widthAnchor).isActive = true
+        }
+        let count = localModels.models.count
+        localScanStatus.stringValue = localModels.lastRefresh == nil ? "" : count == 0 ? "No models available" : "\(count) model\(count == 1 ? "" : "s") available"
+    }
+
+    private func scanLocalModels() {
+        guard localScan == nil else { return }
+        localScanStatus.stringValue = "Looking…"
+        localScan = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.localModels.refresh()
+            self.localScan = nil
+            self.reloadLocalRuntimes()
+        }
+    }
+    @objc private func rescanLocalModels() { scanLocalModels() }
+    @objc private func offlineFallbackChanged(_ sender: NSSwitch) { localModels.usesLocalModelsOffline = sender.state == .on }
+    @objc private func localContextChanged(_ sender: NSPopUpButton) {
+        if let length = sender.selectedItem?.representedObject as? Int { localModels.contextLength = length }
+    }
+    @objc private func startLocalRuntime(_ sender: NSButton) {
+        guard localModels.statuses.indices.contains(sender.tag) else { return }
+        let runtime = localModels.statuses[sender.tag].runtime
+        sender.isEnabled = false; sender.title = "Starting…"
+        localScanStatus.stringValue = "Starting \(runtime.name)…"
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let started = await self.localModels.startRuntime(runtime)
+            self.reloadLocalRuntimes()
+            if !started { self.localScanStatus.stringValue = "\(runtime.name) did not start. Open it yourself, then Look Again." }
+        }
+    }
+    @objc private func addLocalEndpoint() {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Add a model server"
+        alert.informativeText = "Enter the address of an OpenAI-compatible server, such as MLX or llama.cpp on this Mac or your network. Ollama, LM Studio and Jan on this Mac are found automatically."
+        alert.addButton(withTitle: "Add Server"); alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = "192.168.1.20:8080"
+        field.setAccessibilityLabel("Server address")
+        alert.accessoryView = field; alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            guard let runtime = LocalRuntime.custom(field.stringValue) else {
+                self.localScanStatus.stringValue = "That is not an address such as 192.168.1.20:8080"
+                return
+            }
+            var saved = UserDefaults.standard.stringArray(forKey: LocalRuntime.customEndpointsKey) ?? []
+            let address = runtime.baseURL.absoluteString
+            if !saved.contains(address) { saved.append(address) }
+            UserDefaults.standard.set(saved, forKey: LocalRuntime.customEndpointsKey)
+            self.scanLocalModels()
+        }
+    }
+    @objc private func removeLocalEndpoint(_ sender: NSButton) {
+        guard localModels.statuses.indices.contains(sender.tag) else { return }
+        let address = localModels.statuses[sender.tag].runtime.baseURL.absoluteString
+        let saved = (UserDefaults.standard.stringArray(forKey: LocalRuntime.customEndpointsKey) ?? []).filter {
+            LocalRuntime.custom($0)?.baseURL.absoluteString != address
+        }
+        UserDefaults.standard.set(saved, forKey: LocalRuntime.customEndpointsKey)
+        scanLocalModels()
+    }
 
     func setTabsOnly(_ enabled: Bool) {
         paneLayoutSection?.isHidden = enabled
@@ -253,6 +434,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         NSLayoutConstraint.deactivate(pageConstraints)
         pageDocument.subviews.forEach { $0.removeFromSuperview() }
         pageTitle.stringValue = page.rawValue
+        if page == .localModels, scansLocalModelsWhenShown { scanLocalModels() }
         pageDocument.addSubview(content)
         pageConstraints = [
             content.leadingAnchor.constraint(equalTo: pageDocument.leadingAnchor, constant: 28),

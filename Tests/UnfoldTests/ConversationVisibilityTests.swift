@@ -90,7 +90,8 @@ final class ConversationVisibilityTests: XCTestCase {
         second.title = "Second conversation"
         second.report(.user, "A newer message")
         second.onStatus?("Ready")
-        XCTAssertEqual(titles(), ["First conversation", "Second conversation"])
+        // New chats enter at the top; finishing a turn preserves that saved order.
+        XCTAssertEqual(titles(), ["Second conversation", "First conversation"])
         draft.receive(["method": "turn/completed", "params": ["turn": ["id": "first-turn", "status": "completed"]]])
         XCTAssertEqual(titles(), ["Second conversation", "First conversation"])
         XCTAssertEqual(live.selectedRow, 1)

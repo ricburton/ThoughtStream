@@ -26,6 +26,7 @@ actor PythonAnalysisService {
     func analyze(_ source: String) -> PythonAnalysis {
         if let result = cache[source] { return result }
         let result = Self.analyze(source, executable: Self.executable)
+        guard source.utf8.count <= 262_144 else { return result }
         cache[source] = result; order.append(source)
         if order.count > 128 { cache.removeValue(forKey: order.removeFirst()) }
         return result

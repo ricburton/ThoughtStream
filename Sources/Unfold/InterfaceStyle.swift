@@ -1,8 +1,9 @@
 import AppKit
 
-/// Whole-window looks. Rounded Panes and Matrix are experimental alternatives.
+/// Whole-window looks. Rounded Panes and Matrix are experimental alternatives;
+/// Breathe is the standard look with less chrome and more air (see `Breathe`).
 enum InterfaceStyle: String, CaseIterable {
-    case standard, matrix, roundedPanes
+    case standard, matrix, roundedPanes, breathe
 
     static let didChange = Notification.Name("ThoughtStream.interfaceStyleDidChange")
     private static let key = "unfold.interfaceStyle"
@@ -19,13 +20,16 @@ enum InterfaceStyle: String, CaseIterable {
         }
     }
     static var isMatrix: Bool { stored == .matrix }
-    static var hasRoundedPanes: Bool { stored == .roundedPanes }
+    static var isBreathe: Bool { stored == .breathe }
+    /// Panes drawn as separate cards on the workspace backdrop.
+    static var hasRoundedPanes: Bool { stored == .roundedPanes || stored == .breathe }
 
     var title: String {
         switch self {
         case .standard: return "Standard"
         case .matrix: return "Matrix"
         case .roundedPanes: return "Rounded Panes (Experimental)"
+        case .breathe: return "Breathe"
         }
     }
     var keyEquivalent: String {
@@ -33,6 +37,7 @@ enum InterfaceStyle: String, CaseIterable {
         case .standard: return "1"
         case .matrix: return "2"
         case .roundedPanes: return "3"
+        case .breathe: return "4"
         }
     }
     /// Matrix is always dark; the other styles follow the system.

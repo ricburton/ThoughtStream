@@ -76,6 +76,19 @@ enum ChatThreadSummary {
         return response.flatMap(clean)
     }
 
+    /// A sidebar label from the same local model the chat uses. It only asks a
+    /// model whose runtime is already serving; naming a chat never starts one.
+    @MainActor
+    static func generateLocally(input: Input, model: String, registry: LocalModelRegistry? = nil) async throws -> String {
+        let registry = registry ?? .shared
+        guard let found = registry.models.first(where: { $0.identifier == model }) else { throw CancellationError() }
+        let client = LocalModelClient(runtime: found.runtime, session: LocalModelClient.makeSession())
+        let answer = try await client.complete(model: found.inferenceName, messages: [
+            .system(instructions), .user("Transcript:\n" + input.transcript, images: [])])
+        guard let label = clean(answer) else { throw CancellationError() }
+        return label
+    }
+
     static func generate(input: Input, provider: AgentProvider, model: String, executable: URL) async throws -> String {
         let process = SummaryProcess()
         return try await withTaskCancellationHandler {
@@ -147,7 +160,7 @@ final class ChatThreadSummaryCoordinator {
                     let label = try await generate(session, input)
                     try Task.checkCancellation()
                     guard let clean = ChatThreadSummary.clean(label) else { throw CancellationError() }
-                    guard self.sessions.contains(where: { $0 === session }), session.turn == nil,
+                    guard self.sessions.contains(where: { $0 === session }), session.isHistoryLoaded, session.turn == nil,
                           ChatThreadSummary.input(session.history, provider: session.provider) == input else { continue }
                     session.sidebarSummary = clean; session.sidebarSummaryFingerprint = input.fingerprint
                     session.save(); updated()
@@ -159,7 +172,7 @@ final class ChatThreadSummaryCoordinator {
     }
 
     private func next() -> (Session, ChatThreadSummary.Input)? {
-        for session in sessions where session.turn == nil && !session.needsHistory && session.outbox.messages.isEmpty {
+        for session in sessions where session.isHistoryLoaded && session.turn == nil && !session.needsHistory && session.outbox.messages.isEmpty {
             guard let input = ChatThreadSummary.input(session.history, provider: session.provider),
                   session.sidebarSummaryFingerprint != input.fingerprint else { continue }
             if let failure = failed[session.id], failure.0 == input.fingerprint, Date().timeIntervalSince(failure.1) < 300 { continue }

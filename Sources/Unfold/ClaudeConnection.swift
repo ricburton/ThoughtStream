@@ -58,12 +58,13 @@ final class ClaudeConnection {
         return script
     }
 
-    static func arguments(settings: InferenceSettings, mode: AccessMode, resume: String?, fork: Bool) -> [String] {
+    static func arguments(settings: InferenceSettings, mode: AccessMode, resume: String?, fork: Bool, models: [[String: Any]] = []) -> [String] {
+        let fast = settings.tier == "fast" && InferenceSettings.supportsClaudeFastMode(settings.model, in: models)
         var args = ["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
                     "--include-partial-messages", "--permission-prompt-tool", "stdio",
                     "--permission-mode", mode == .fullAccess ? "bypassPermissions" : "manual",
                     "--model", settings.model, "--effort", settings.effort,
-                    "--settings", "{\"fastMode\":\(settings.claudeFastModeEnabled)}",
+                    "--settings", "{\"fastMode\":\(fast)}",
                     "--append-system-prompt", AgentInstructions.text]
         if let resume { args += ["--resume", resume] }
         if fork { args.append("--fork-session") }
@@ -80,7 +81,10 @@ final class ClaudeConnection {
         models.compactMap { model in
             guard let id = model["value"] as? String ?? model["id"] as? String, !id.isEmpty else { return nil }
             var record = model
-            record["model"] = id
+            // Pin named aliases to the version their capability record describes.
+            // Keep the provider's special recommended default as a floating choice.
+            let resolved = (model["resolvedModel"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            record["model"] = id == "default" ? id : resolved ?? id
             record["displayName"] = model["displayName"] as? String ?? id
             let efforts = model["supportedEffortLevels"] as? [String] ?? InferenceSettings.claudeEfforts
             let supported: [[String: String]] = efforts.map { ["reasoningEffort": $0] }
@@ -89,12 +93,12 @@ final class ClaudeConnection {
         }
     }
 
-    func start(executable: URL, project: URL, settings: InferenceSettings, resume: String?, fork: Bool = false, discoveryOnly: Bool = false) async throws {
+    func start(executable: URL, project: URL, settings: InferenceSettings, resume: String?, fork: Bool = false, discoveryOnly: Bool = false, models: [[String: Any]] = []) async throws {
         guard process == nil else { return }
         let task = Process(), stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
         input = stdin; output = stdout; errors = stderr; intentionalStop = false
         task.executableURL = executable; task.currentDirectoryURL = project
-        task.arguments = discoveryOnly ? Self.discoveryArguments : Self.arguments(settings: settings, mode: AccessMode.selected, resume: resume, fork: fork)
+        task.arguments = discoveryOnly ? Self.discoveryArguments : Self.arguments(settings: settings, mode: AccessMode.selected, resume: resume, fork: fork, models: models)
         var env = ProcessInfo.processInfo.environment
         env.removeValue(forKey: "CLAUDECODE")
         env["PATH"] = [FileManager.default.homeDirectoryForCurrentUser.path + "/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", env["PATH"] ?? "/usr/bin:/bin"].joined(separator: ":")

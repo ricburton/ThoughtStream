@@ -2,9 +2,16 @@
 
 Run commands from the repository root. **`Build-and-Open.command` is the utility
 that builds a new ThoughtStream app.** It calls `swift build -c release`, assembles
-the app bundle, adds tools and resources, and ad-hoc signs and verifies it. This is
+the app bundle, adds tools and resources, and signs and verifies it. This is
 a Swift Package Manager project (`Package.swift`), not a hand-maintained Xcode
 project; Xcode can open the package, but `xcodebuild` is not the packaging workflow.
+
+Local builds prefer an available Developer ID Application certificate, then Apple
+Development, so successive builds can retain their macOS privacy identity. Set
+`THOUGHTSTREAM_SIGNING_IDENTITY` to select a specific identity. Without either
+certificate (or with an explicit `-`), signing is ad-hoc and privacy grants can
+need renewing when the build changes. Signing does not grant privacy access;
+the user still controls those permissions in System Settings.
 
 Automatic development restarts are currently paused at the user's request.
 `~/Library/Caches/UnfoldNative/restarts-paused` makes the installer leave the app

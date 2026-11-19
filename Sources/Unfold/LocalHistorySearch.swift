@@ -85,7 +85,7 @@ actor LocalHistorySearch {
         return result
     }
     /// File parsing yields to searches; unchanged files are never parsed twice.
-    func refresh() async throws {
+    func refresh(modifiedSince cutoff: Date? = nil) async throws {
         guard !refreshing else { return }
         refreshing = true
         defer { refreshing = false }
@@ -98,6 +98,9 @@ actor LocalHistorySearch {
             try Task.checkCancellation()
             let path = url.path
             seen.insert(path)
+            // Startup warms recent work only. Searching explicitly can extend
+            // the index to the archive; existing archive results stay on disk.
+            if let cutoff, Self.activityDate(url, format: format) < cutoff { continue }
             let existing = try rows("SELECT stamp,metadata FROM sources WHERE path=?", [path]).first
             let prior = existing.flatMap { try? JSONDecoder().decode(Document.self, from: Data($0[1].utf8)) }
             let fileStamp = Self.stamp(url, format: format)
@@ -208,6 +211,15 @@ actor LocalHistorySearch {
 
 extension LocalHistorySearch {
     enum Format: Sendable { case thoughtStream, codex, claude }
+    static func activityDate(_ url: URL, format: Format) -> Date {
+        if format == .thoughtStream,
+           let data = ConversationStore.metadata(in: url, includingActivity: true),
+           let metadata = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           let date = metadata["lastConversationActivity"] as? Double ?? metadata["lastActivity"] as? Double {
+            return Date(timeIntervalSince1970: date)
+        }
+        return (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+    }
     static func files(_ roots: Roots) -> [(URL, Format)] {
         let manager = FileManager.default
         var result = ((try? manager.contentsOfDirectory(at: roots.sessions, includingPropertiesForKeys: nil)) ?? [])

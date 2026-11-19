@@ -11,6 +11,8 @@ final class WorkspaceHistorySearch: NSObject, NSSearchFieldDelegate, NSTableView
     private var queryTask: Task<Void, Never>?
     private var results: [LocalHistorySearch.Result] = []
     private var indexing = false
+    private var refreshingRecent = false
+    private var needsArchiveRefresh = false
     private(set) var isSearching = false
     var onVisibility: ((Bool) -> Void)?
     var onOpen: ((LocalHistorySearch.Result) -> Void)?
@@ -44,13 +46,22 @@ final class WorkspaceHistorySearch: NSObject, NSSearchFieldDelegate, NSTableView
         view.isHidden = true
     }
     func refresh() {
-        guard refreshTask == nil else { return }
+        guard refreshTask == nil else {
+            if isSearching && refreshingRecent { needsArchiveRefresh = true }
+            return
+        }
+        refreshingRecent = !isSearching
+        let cutoff = refreshingRecent ? Date().addingTimeInterval(-3 * 24 * 60 * 60) : nil
         indexing = true
         refreshTask = Task { [weak self, index] in
             var errorMessage: String?
-            do { try await index.refresh() } catch is CancellationError { return } catch { errorMessage = error.localizedDescription }
+            do { try await index.refresh(modifiedSince: cutoff) } catch is CancellationError { return } catch { errorMessage = error.localizedDescription }
             guard let self, !Task.isCancelled else { return }
             self.indexing = false; self.refreshTask = nil
+            if self.needsArchiveRefresh {
+                self.needsArchiveRefresh = false
+                if self.isSearching { self.refresh(); return }
+            }
             if self.isSearching { self.runQuery(errorMessage: errorMessage) }
         }
     }

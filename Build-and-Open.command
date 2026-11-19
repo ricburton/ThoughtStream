@@ -120,11 +120,16 @@ trap 'rm -rf "$thoughtstream_signing_root"' EXIT
 thoughtstream_signing_app="$thoughtstream_signing_root/ThoughtStream.app"
 ditto --norsrc --noextattr "$thoughtstream_app_dir" "$thoughtstream_signing_app"
 # Ad-hoc signatures bind privacy decisions to each build's changing hash.
-# Prefer a stable development identity so macOS remembers allow AND deny.
+# Prefer the release identity, then a development identity, so macOS can
+# recognize successive builds when matching saved privacy decisions.
 # Explicit THOUGHTSTREAM_SIGNING_IDENTITY=- keeps portable ad-hoc builds possible.
 thoughtstream_signing_identity="${THOUGHTSTREAM_SIGNING_IDENTITY:-}"
 if [ -z "$thoughtstream_signing_identity" ]; then
-  thoughtstream_signing_identity="$(security find-identity -v -p codesigning | sed -nE '/"Apple Development:/{s/^[[:space:]]*[0-9]+\) ([A-F0-9]+).*/\1/p;}' | head -n 1)"
+  thoughtstream_identities="$(security find-identity -v -p codesigning)"
+  thoughtstream_signing_identity="$(printf '%s\n' "$thoughtstream_identities" | sed -nE '/"Developer ID Application:/{s/^[[:space:]]*[0-9]+\) ([A-F0-9]+).*/\1/p;}' | head -n 1)"
+  if [ -z "$thoughtstream_signing_identity" ]; then
+    thoughtstream_signing_identity="$(printf '%s\n' "$thoughtstream_identities" | sed -nE '/"Apple Development:/{s/^[[:space:]]*[0-9]+\) ([A-F0-9]+).*/\1/p;}' | head -n 1)"
+  fi
   thoughtstream_signing_identity="${thoughtstream_signing_identity:--}"
 fi
 for thoughtstream_tool in "$thoughtstream_signing_app/Contents/Resources/ThoughtStream_ThoughtStream.bundle/Tools/ruff-arm64" "$thoughtstream_signing_app/Contents/Resources/ThoughtStream_ThoughtStream.bundle/Tools/ruff-x86_64" "$thoughtstream_signing_app/Contents/Resources/CodeAnalysis/node"; do

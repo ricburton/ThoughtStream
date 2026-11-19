@@ -5,6 +5,8 @@ import AppKit
 @MainActor
 final class ConversationView: NativeFeedCard, NSTextViewDelegate {
     var onRetryQueuedChat: (() -> Void)?
+    var onCancelQueuedChat: ((UUID) -> Void)?
+    var onAnswerQueuedChatLocally: ((UUID) -> Void)?
     let transcript: NSTextView
     private var revealState = StreamTextRevealState(text: "")
     private var textAnimator: StreamTextAnimator?
@@ -12,6 +14,8 @@ final class ConversationView: NativeFeedCard, NSTextViewDelegate {
     private lazy var scrollMotion = FeedScrollMotion(scroll)
     private let latest = NSButton(title: "Latest ↓", target: nil, action: nil)
     private let empty = NSTextField(labelWithString: "Send a message to start the conversation.")
+    let working = ConversationWorkingIndicator()
+    private var scrollBottom: NSLayoutConstraint!
     private let contentInset = NSSize(width: PaneSpacing.textInset, height: 16)
     private var feed = FeedBuffer()
     private var starts: [Int] = []
@@ -22,6 +26,22 @@ final class ConversationView: NativeFeedCard, NSTextViewDelegate {
     private var resizeAnchor: FeedTextScrollAnchor?
     private var resizeAnchorExpiry: DispatchWorkItem?
     var records: [StreamRecord] { feed.records }
+    /// Typeset every message again, for a change no record carries (text scale,
+    /// the actions offered on a waiting message). An emptied buffer makes the
+    /// incremental update replace the transcript from its first record.
+    func rerender() {
+        let records = feed.records
+        guard !records.isEmpty else { return }
+        feed = FeedBuffer()
+        replace(records, preservingPosition: true)
+    }
+    /// Set by a cramped pane; 1 restores the regular reading size.
+    var textScale: CGFloat = 1 {
+        didSet {
+            guard textScale != oldValue else { return }
+            rerender()
+        }
+    }
 
     override init(frame frameRect: NSRect) {
         let storage = NSTextStorage()
@@ -79,17 +99,34 @@ final class ConversationView: NativeFeedCard, NSTextViewDelegate {
                 }
             }
         }
-        for child in [title, latest, scroll, empty] { child.translatesAutoresizingMaskIntoConstraints = false; addSubview(child) }
+        working.isHidden = true
+        for child in [title, latest, scroll, empty, working] { child.translatesAutoresizingMaskIntoConstraints = false; addSubview(child) }
+        scrollBottom = scroll.bottomAnchor.constraint(equalTo: bottomAnchor)
         NSLayoutConstraint.activate([
             title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: contentInset.width), title.topAnchor.constraint(equalTo: topAnchor, constant: contentInset.height),
             latest.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -contentInset.width), latest.centerYAnchor.constraint(equalTo: title.centerYAnchor),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor), scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8), scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scroll.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8), scrollBottom,
+            working.leadingAnchor.constraint(equalTo: leadingAnchor, constant: contentInset.width), working.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -contentInset.width),
+            working.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -ConversationWorkingIndicator.bottomMargin), working.heightAnchor.constraint(equalToConstant: ConversationWorkingIndicator.height),
             empty.leadingAnchor.constraint(equalTo: leadingAnchor, constant: contentInset.width), empty.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -contentInset.width), empty.topAnchor.constraint(equalTo: scroll.topAnchor, constant: contentInset.height)
         ])
     }
     required init?(coder: NSCoder) { fatalError("Not implemented") }
     deinit { if let positionObserver { NotificationCenter.default.removeObserver(positionObserver) } }
+
+    /// Shows a typing indicator beneath the latest message while a turn runs,
+    /// so work in progress is visible even when no reply text is streaming.
+    /// `detail` describes the current activity and returns nil once the turn ends.
+    func setWorking(_ isWorking: Bool, detail: @escaping () -> String?) {
+        working.detail = detail
+        working.onFinished = { [weak self] in self?.setWorking(false, detail: { nil }) }
+        guard isWorking == working.isHidden else { working.refresh(); return }
+        working.isHidden = !isWorking
+        scrollBottom.constant = isWorking ? -(ConversationWorkingIndicator.height + ConversationWorkingIndicator.bottomMargin + 4) : 0
+        if isWorking { working.start() } else { working.stop() }
+        needsLayout = true
+    }
 
     static func includes(_ record: StreamRecord) -> Bool {
         [StreamKind.user.rawValue, StreamKind.prose.rawValue].contains(record.kind)
@@ -183,9 +220,9 @@ final class ConversationView: NativeFeedCard, NSTextViewDelegate {
         let result = NSMutableAttributedString(string: "")
         let isUser = record.kind == StreamKind.user.rawValue
         if isUser, let status = record.queuedStatus {
-            result.append(QueuedChatPresentation.label(status: status, detail: record.queuedDetail))
+            result.append(QueuedChatPresentation.label(status: status, detail: record.queuedDetail, messageID: record.queuedMessageID))
         }
-        var renderer = NativeFeedRenderer(size: Typography.conversation.pointSize, analyses: [:])
+        var renderer = NativeFeedRenderer(size: max(9, (Typography.conversation.pointSize * textScale).rounded()), analyses: [:])
         for block in renderer.render(record) {
             switch block {
             case .text(let text), .prose(let text, _), .code(let text, _, _): result.append(text)
@@ -215,7 +252,13 @@ final class ConversationView: NativeFeedCard, NSTextViewDelegate {
     }
     func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
         guard let url = link as? URL, url.scheme == "thoughtstream-queue" else { return false }
-        onRetryQueuedChat?(); return true
+        let message = UUID(uuidString: url.lastPathComponent)
+        switch url.host {
+        case "cancel": if let message { onCancelQueuedChat?(message) }
+        case "local": if let message { onAnswerQueuedChatLocally?(message) }
+        default: onRetryQueuedChat?()
+        }
+        return true
     }
     private func finishUpdate(animated: Bool = false) {
         empty.isHidden = !records.isEmpty
@@ -281,5 +324,116 @@ final class ConversationView: NativeFeedCard, NSTextViewDelegate {
         resizeAnchorExpiry = expiry
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: expiry)
         updating = false
+    }
+}
+
+/// Three pulsing dots in a small reply bubble, followed by what the agent is
+/// doing and for how long. Static under Reduce Motion.
+@MainActor
+final class ConversationWorkingIndicator: NSView {
+    static let height: CGFloat = 26
+    static let bottomMargin: CGFloat = 10
+    var detail: (() -> String?)?
+    var onFinished: (() -> Void)?
+    private let bubble = NSView()
+    private let label = NSTextField(labelWithString: "Working")
+    private var dots: [CALayer] = []
+    private var timer: Timer?
+    private var startedAt: Date?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        bubble.wantsLayer = true
+        bubble.layer?.cornerRadius = Self.height / 2
+        label.font = Typography.caption; label.textColor = FeedPalette.muted
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        for index in 0..<3 {
+            let dot = CALayer()
+            dot.bounds = CGRect(x: 0, y: 0, width: 7, height: 7); dot.cornerRadius = 3.5
+            dot.position = CGPoint(x: 14 + CGFloat(index) * 11, y: Self.height / 2)
+            bubble.layer?.addSublayer(dot); dots.append(dot)
+        }
+        for child in [bubble, label] { child.translatesAutoresizingMaskIntoConstraints = false; addSubview(child) }
+        NSLayoutConstraint.activate([
+            bubble.leadingAnchor.constraint(equalTo: leadingAnchor), bubble.topAnchor.constraint(equalTo: topAnchor), bubble.bottomAnchor.constraint(equalTo: bottomAnchor),
+            bubble.widthAnchor.constraint(equalToConstant: 50),
+            label.leadingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: 10), label.trailingAnchor.constraint(equalTo: trailingAnchor),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+        setAccessibilityElement(true); setAccessibilityRole(.staticText)
+        updateColors()
+    }
+    required init?(coder: NSCoder) { fatalError("Not implemented") }
+    deinit { timer?.invalidate() }
+
+    var text: String { label.stringValue }
+
+    /// Names the latest activity in plain words; the stream shows the details.
+    nonisolated static func activity(after records: [StreamRecord]) -> String {
+        guard let last = records.last(where: { $0.kind != StreamKind.system.rawValue }) else { return "Working" }
+        switch StreamKind(rawValue: last.kind) {
+        case .user: return "Thinking"
+        case .reasoning: return "Thinking"
+        case .command: return last.command?.state == .running ? "Running a command" : "Working"
+        case .output: return "Reading command output"
+        case .change: return "Editing files"
+        case .code: return "Writing code"
+        case .tool: return "Using a tool"
+        case .prose: return "Writing"
+        case .compaction: return "Compacting context"
+        default: return "Working"
+        }
+    }
+
+    func start() {
+        startedAt = Date()
+        refresh(); animate()
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh() }
+        }
+    }
+    func stop() {
+        timer?.invalidate(); timer = nil; startedAt = nil
+        dots.forEach { $0.removeAllAnimations() }
+    }
+    func refresh() {
+        guard let activity = detail?() else {
+            if timer != nil { onFinished?() }
+            return
+        }
+        var parts = [activity]
+        if let startedAt {
+            let seconds = Int(Date().timeIntervalSince(startedAt))
+            if seconds > 0 { parts.append(seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m \(seconds % 60)s") }
+        }
+        label.stringValue = parts.joined(separator: " · ")
+        setAccessibilityLabel("Agent is working: " + label.stringValue)
+    }
+    private func animate() {
+        dots.forEach { $0.removeAllAnimations() }
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let now = CACurrentMediaTime()
+        for (index, dot) in dots.enumerated() {
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 0.3; pulse.toValue = 1
+            pulse.duration = 0.45; pulse.autoreverses = true; pulse.repeatCount = .infinity
+            pulse.beginTime = now + Double(index) * 0.18
+            pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            dot.add(pulse, forKey: "pulse")
+        }
+    }
+    private func updateColors() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            bubble.layer?.backgroundColor = FeedPalette.incomingMessage.cgColor
+            dots.forEach { $0.backgroundColor = FeedPalette.muted.cgColor }
+        }
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); updateColors() }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // Core Animation drops animations when a layer leaves its window.
+        if window != nil, timer != nil { animate() }
     }
 }

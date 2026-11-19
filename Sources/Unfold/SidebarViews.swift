@@ -1,7 +1,7 @@
 import AppKit
 
 enum SidebarMetrics {
-    static let rowHeight: CGFloat = 30
+    static var rowHeight: CGFloat { InterfaceStyle.isBreathe ? Breathe.sidebarRowHeight : 30 }
 }
 
 @MainActor

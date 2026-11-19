@@ -24,9 +24,26 @@ indirect enum PaneLayout: Codable, Equatable {
     case pane(UUID)
     case split(vertical: Bool, fraction: Double, first: PaneLayout, second: PaneLayout)
 
-    static let maximumColumns = 12
-    static let maximumRows = 6
+    /// A comfortable pane. Wider panes use the regular chrome and text size.
     static let minimumPaneSize = NSSize(width: 260, height: 300)
+    /// The floor on a cramped display: the pane's chrome and text go compact.
+    static let compactPaneSize = NSSize(width: 170, height: 260)
+    /// Lanes share the visible area up to these counts, then the pane area scrolls.
+    static let visibleColumnsBeforeScrolling = 10
+    static let visibleRowsBeforeScrolling = 5
+
+    /// The smallest pane for a visible pane area. A big display gives every
+    /// lane a tenth of its width (a fifth of its height); a cramped one stops
+    /// at the compact floor and scrolls sooner. There is no cap on pane count.
+    static func adaptiveMinimum(viewport: NSSize, paneInset: CGFloat = 0, divider: CGFloat = 1) -> NSSize {
+        func share(_ extent: CGFloat, _ lanes: Int, _ floor: CGFloat) -> CGFloat {
+            guard extent.isFinite, extent > 0 else { return floor }
+            let each = ((extent - CGFloat(lanes - 1) * divider) / CGFloat(lanes)).rounded(.down) - 2 * paneInset
+            return max(floor, each)
+        }
+        return NSSize(width: share(viewport.width, visibleColumnsBeforeScrolling, compactPaneSize.width),
+                      height: share(viewport.height, visibleRowsBeforeScrolling, compactPaneSize.height))
+    }
 
     var dimensions: (columns: Int, rows: Int) {
         switch self {
@@ -54,17 +71,9 @@ indirect enum PaneLayout: Codable, Equatable {
         }
     }
 
-    func permitsSplit(of id: UUID, vertical: Bool, availableSize: NSSize? = nil, paneInset: CGFloat = 0,
-                      paneMinimum: NSSize = Self.minimumPaneSize) -> Bool {
-        guard ids.contains(id) else { return false }
-        let proposed = replacing(id, with: .split(vertical: vertical, fraction: 0.5,
-                                                  first: .pane(id), second: .pane(UUID())))
-        let dimensions = proposed.dimensions
-        guard dimensions.columns <= Self.maximumColumns, dimensions.rows <= Self.maximumRows else { return false }
-        guard let availableSize else { return true }
-        let required = proposed.minimumSize(paneInset: paneInset, paneMinimum: paneMinimum)
-        return required.width <= availableSize.width && required.height <= availableSize.height
-    }
+    /// Any existing pane can be split. Room is made by shrinking panes to the
+    /// adaptive minimum and then scrolling, never by refusing the split.
+    func permitsSplit(of id: UUID) -> Bool { ids.contains(id) }
 
     var ids: [UUID] {
         switch self {
@@ -91,9 +100,9 @@ indirect enum PaneLayout: Codable, Equatable {
     }
 
     /// Rows of side-by-side panes, filled left to right, with equal shares.
-    static func grid(_ ids: [UUID]) -> PaneLayout? {
+    static func grid(_ ids: [UUID], columns requested: Int? = nil) -> PaneLayout? {
         guard !ids.isEmpty else { return nil }
-        let columns = Int(Double(ids.count).squareRoot().rounded(.up))
+        let columns = min(ids.count, max(1, requested ?? Int(Double(ids.count).squareRoot().rounded(.up))))
         let rows = stride(from: 0, to: ids.count, by: columns).map { Array(ids[$0..<min($0 + columns, ids.count)]) }
         func chain(_ parts: [PaneLayout], weights: [Int], vertical: Bool) -> PaneLayout {
             guard parts.count > 1 else { return parts[0] }
@@ -103,6 +112,37 @@ indirect enum PaneLayout: Codable, Equatable {
         }
         let rowLayouts = rows.map { row in chain(row.map(PaneLayout.pane), weights: row.map { _ in 1 }, vertical: true) }
         return chain(rowLayouts, weights: rows.map { _ in 1 }, vertical: false)
+    }
+
+    /// The column count whose panes come closest to a readable upright shape
+    /// in this pane area, preferring grids without a ragged last row.
+    static func gridColumns(count: Int, viewport: NSSize) -> Int {
+        guard count > 1 else { return 1 }
+        guard viewport.width > 0, viewport.height > 0 else { return Int(Double(count).squareRoot().rounded(.up)) }
+        let minimum = adaptiveMinimum(viewport: viewport)
+        var best = 1, bestScore = Double.greatestFiniteMagnitude
+        for columns in 1...count {
+            let rows = Int((Double(count) / Double(columns)).rounded(.up))
+            // Panes never get smaller than the adaptive minimum; past it the area scrolls.
+            let width = max(minimum.width, viewport.width / CGFloat(columns))
+            let height = max(minimum.height, viewport.height / CGFloat(rows))
+            let shape = abs(log(Double(width / height) / 0.9))
+            let scrolling = Double(max(0, columns - visibleColumnsBeforeScrolling)) * 0.6
+                + Double(max(0, rows - visibleRowsBeforeScrolling)) * 0.9
+            let ragged = Double(columns * rows - count) / Double(count) * 0.5
+            let score = shape + scrolling + ragged
+            if score < bestScore - 0.0001 { best = columns; bestScore = score }
+        }
+        return best
+    }
+
+    /// A tidy layout for any number of panes, keeping their reading order.
+    static func arranged(_ ids: [UUID], as arrangement: PaneArrangement, viewport: NSSize = .zero) -> PaneLayout? {
+        switch arrangement {
+        case .grid: return grid(ids, columns: gridColumns(count: ids.count, viewport: viewport))
+        case .columns: return grid(ids, columns: ids.count)
+        case .rows: return grid(ids, columns: 1)
+        }
     }
 
     /// The surviving sibling identifies the row or column that loses a pane.
@@ -115,6 +155,18 @@ indirect enum PaneLayout: Codable, Equatable {
             return (sibling, vertical)
         }
         return first.removalBalanceTarget(for: id) ?? second.removalBalanceTarget(for: id)
+    }
+}
+
+enum PaneArrangement: String, CaseIterable {
+    case grid, columns, rows
+
+    var title: String {
+        switch self {
+        case .grid: return "Tidy into Grid"
+        case .columns: return "Side by Side"
+        case .rows: return "Stacked"
+        }
     }
 }
 
