@@ -13,7 +13,7 @@ final class PaneCanvasController: NSViewController {
         PaneCanvasEdge.allCases.map { ($0, PaneOverflowButton(edge: $0)) })
     private var scrollMonitor: Any?
     private var boundsObserver: NSObjectProtocol?
-    private var gestureIsHorizontal = false
+    private var scrollGesture = PaneScrollGesture()
     private var fitting = false
     private var fittedViewport = NSSize.zero
     private var fittedMinimum = NSSize.zero
@@ -73,6 +73,7 @@ final class PaneCanvasController: NSViewController {
     override func viewDidDisappear() {
         super.viewDidDisappear()
         if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor); self.scrollMonitor = nil }
+        scrollGesture = PaneScrollGesture()
     }
 
     /// Swap the pane tree while keeping the scroll position. A topology change
@@ -224,35 +225,56 @@ final class PaneCanvasController: NSViewController {
 
     /// Feeds and composers scroll vertically and would swallow a sideways
     /// swipe. Give horizontal gestures to the canvas unless the pointer is over
-    /// something that scrolls sideways itself (tab strips, attachment strips).
+    /// something that can still scroll sideways itself (tabs, attachments).
     private func consumes(_ event: NSEvent) -> Bool {
         guard isViewLoaded, let window = view.window, event.window === window, overflows.horizontal,
               let content = window.contentView,
               view.bounds.contains(view.convert(event.locationInWindow, from: nil)) else { return false }
-        let horizontal: Bool
-        if event.phase.contains(.began) || event.phase.contains(.mayBegin) {
-            // The direction a swipe starts in holds through its momentum.
-            gestureIsHorizontal = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY)
-            horizontal = gestureIsHorizontal
-        } else if event.phase == [] && event.momentumPhase == [] {
-            // A wheel mouse reports each notch on its own; Shift turns it sideways.
-            horizontal = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY)
-        } else {
-            horizontal = gestureIsHorizontal
-        }
-        guard horizontal else { return false }
-        var node = content.hitTest(content.superview?.convert(event.locationInWindow, from: nil) ?? event.locationInWindow)
+        guard let distance = scrollGesture.distance(x: event.scrollingDeltaX, y: event.scrollingDeltaY,
+            phase: event.phase, momentum: event.momentumPhase, shift: event.modifierFlags.contains(.shift),
+            precise: event.hasPreciseScrollingDeltas) else { return false }
+        let node = content.hitTest(content.superview?.convert(event.locationInWindow, from: nil) ?? event.locationInWindow)
+        return scrollSideways(by: distance, over: node)
+    }
+
+    /// Route a sideways movement from any pane surface, preserving the local
+    /// vertical reading position. Nested horizontal content gets first use.
+    @discardableResult
+    func scrollSideways(by distance: CGFloat, over target: NSView?) -> Bool {
+        guard overflows.horizontal, distance != 0 else { return false }
+        var node = target
         while let current = node, current !== scroll {
-            if let inner = current as? NSScrollView, let inside = inner.documentView,
-               inside.frame.width > inner.contentSize.width + 1 { return false }
+            if let inner = current as? NSScrollView, let inside = inner.documentView {
+                let visible = inner.documentVisibleRect
+                if distance > 0 && visible.minX > inside.bounds.minX + 0.5 { return false }
+                if distance < 0 && visible.maxX < inside.bounds.maxX - 0.5 { return false }
+            }
             node = current.superview
         }
         guard node === scroll else { return false }
-        let distance = event.scrollingDeltaX * (event.hasPreciseScrollingDeltas ? 1 : 12)
         var origin = scroll.contentView.bounds.origin
         origin.x -= distance
         scrollTo(origin, animated: false)
         return true
+    }
+}
+
+/// Trackpads may begin with zero movement. Wait for the first nonzero delta
+/// before locking the axis, and retain it for the gesture's momentum.
+struct PaneScrollGesture {
+    private var horizontal: Bool?
+
+    mutating func distance(x: CGFloat, y: CGFloat, phase: NSEvent.Phase,
+                           momentum: NSEvent.Phase, shift: Bool, precise: Bool) -> CGFloat? {
+        let wheel = phase.isEmpty && momentum.isEmpty
+        if wheel || phase.contains(.began) || phase.contains(.mayBegin) { horizontal = nil }
+        let sideways = shift && x == 0 ? y : x
+        if horizontal == nil, x != 0 || y != 0 {
+            horizontal = shift || abs(x) > abs(y)
+        }
+        let result = horizontal == true && sideways != 0 ? sideways * (precise ? 1 : 12) : nil
+        if phase.contains(.cancelled) || momentum.contains(.ended) { horizontal = nil }
+        return result
     }
 }
 

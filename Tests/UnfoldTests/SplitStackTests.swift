@@ -38,7 +38,7 @@ final class SplitStackTests: XCTestCase {
             try? FileManager.default.removeItem(at: root)
         }
         let window = try XCTUnwrap(workspace.window)
-        window.setContentSize(NSSize(width: 1400, height: 1000))
+        window.setContentSize(NSSize(width: 1400, height: 1200))
         let first = try XCTUnwrap(panes(workspace).first)
         first.prompt.string = "Original draft"
         workspace.splitStream(nil)

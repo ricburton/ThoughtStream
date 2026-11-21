@@ -50,8 +50,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private let heading = NSTextField(labelWithString: "ThoughtStream")
     private let loginButton = NSButton(title: "Connect ChatGPT", target: nil, action: nil)
     private let settingsButton = NSButton(title: "Settings", target: nil, action: nil)
-    private var settingsWidth: NSLayoutConstraint?
-    private var settingsHeight: NSLayoutConstraint?
+    private let addPaneButton = AddPaneButton(title: "Add Pane", target: nil, action: nil)
     private var headerRow: NSStackView?
     private var headerHeight: NSLayoutConstraint?
     private var titlebarControls: NSTitlebarAccessoryViewController?
@@ -59,7 +58,6 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private let claudeConnectButton = NSButton(title: "Connect Claude", target: nil, action: nil)
     private let claudeAccountStatus = NSTextField(wrappingLabelWithString: "Use your Claude Code sign-in on this Mac.")
     private var claudeSignInTask: Task<Void, Never>?
-    private let activity = NSProgressIndicator()
     private var activityTimer: Timer?
     private var historyCacheTimer: Timer?
     private var startedAt: Date?
@@ -176,7 +174,9 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     required init?(coder: NSCoder) { fatalError("Not implemented") }
 
     private func build() {
-        let outer = NSSplitViewController(); outer.splitView.isVertical = true; outer.splitView.dividerStyle = .thin
+        let outer = NSSplitViewController()
+        outer.splitView = WorkspaceSplitView()
+        outer.splitView.isVertical = true; outer.splitView.dividerStyle = .thin
         let rail = NSViewController(); rail.view = WorkspaceSurface(fill: FeedPalette.backdrop)
         let new = NSButton(title: "", target: self, action: #selector(newChat(_:)))
         new.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: nil)
@@ -214,27 +214,12 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         let inferenceControls = makeInferenceControls()
         let open = SidebarActionButton(title: "Open project…", target: self, action: #selector(openProject(_:)))
         open.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil); open.imagePosition = .imageLeading
-        let projectsTitle = NSTextField(labelWithString: "Projects")
-        projectsTitle.font = Typography.section
-        projectsTitle.textColor = FeedPalette.muted
-        // Live chats above, projects (with their saved conversations) below.
-        let sections: [(NSTextField?, NSScrollView)] = [(nil, liveScroll), (projectsTitle, tableScroll)]
-        for (heading, scroll) in sections {
+        // The split divider doubles as the Projects heading and resize tab.
+        for scroll in [liveScroll, tableScroll] {
             let section = NSView()
             scroll.translatesAutoresizingMaskIntoConstraints = false
             section.addSubview(scroll)
-            if let heading {
-                heading.translatesAutoresizingMaskIntoConstraints = false
-                section.addSubview(heading)
-                NSLayoutConstraint.activate([
-                    heading.topAnchor.constraint(equalTo: section.topAnchor, constant: 2),
-                    heading.leadingAnchor.constraint(equalTo: section.leadingAnchor, constant: 8),
-                    heading.trailingAnchor.constraint(equalTo: section.trailingAnchor, constant: -8),
-                    scroll.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 6)
-                ])
-            } else {
-                scroll.topAnchor.constraint(equalTo: section.topAnchor).isActive = true
-            }
+            scroll.topAnchor.constraint(equalTo: section.topAnchor).isActive = true
             NSLayoutConstraint.activate([
                 scroll.leadingAnchor.constraint(equalTo: section.leadingAnchor),
                 scroll.trailingAnchor.constraint(equalTo: section.trailingAnchor),
@@ -251,7 +236,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         railStack.translatesAutoresizingMaskIntoConstraints = false; rail.view.addSubview(railStack)
         NSLayoutConstraint.activate([
             sidebarSplit.widthAnchor.constraint(equalTo: railStack.widthAnchor),
-            sidebarSplit.heightAnchor.constraint(greaterThanOrEqualToConstant: 190),
+            sidebarSplit.heightAnchor.constraint(greaterThanOrEqualToConstant: 216),
             open.widthAnchor.constraint(equalTo: railStack.widthAnchor),
             open.heightAnchor.constraint(equalToConstant: 28),
             railStack.leadingAnchor.constraint(equalTo: rail.view.leadingAnchor, constant: 12),
@@ -285,16 +270,21 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         settings.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         settings.imagePosition = .imageLeading
         settings.image = settings.image?.withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
-        settingsWidth = settings.widthAnchor.constraint(equalToConstant: 110)
-        settingsWidth?.isActive = true
-        settingsHeight = settings.heightAnchor.constraint(equalToConstant: 32)
-        settingsHeight?.isActive = true
-        let header = NSStackView(views: [activity, NSView(), settings]); header.orientation = .horizontal; header.spacing = 10
+        settings.setAccessibilityLabel("Settings")
+        addPaneButton.target = self
+        addPaneButton.action = #selector(splitStream(_:))
+        addPaneButton.toolTip = "Add Pane (⌘P)"
+        addPaneButton.setAccessibilityLabel("Add Pane")
+        addPaneButton.setAccessibilityHelp("Add a pane. Keyboard shortcut: Command-P.")
+        addPaneButton.widthAnchor.constraint(equalToConstant: 146).isActive = true
+        addPaneButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        settingsButton.widthAnchor.constraint(equalToConstant: 100).isActive = true
+        settingsButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        let header = NSStackView(views: [NSView(), settingsButton, addPaneButton]); header.orientation = .horizontal; header.spacing = 10
         header.alignment = .centerY
         headerRow = header
         headerHeight = header.heightAnchor.constraint(equalToConstant: 40)
         status.font = .systemFont(ofSize: 12); status.textColor = .secondaryLabelColor; status.lineBreakMode = .byTruncatingMiddle
-        activity.style = .spinning; activity.controlSize = .small; activity.isDisplayedWhenStopped = false
         streamSplit.splitView.isVertical = true; streamSplit.splitView.dividerStyle = .thin; body.addChild(streamSplit)
         configure(primaryColumn)
         columnStore[primaryColumn.columnID] = primaryColumn
@@ -334,26 +324,20 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         outer.addSplitViewItem(NSSplitViewItem(viewController: body)); window?.contentViewController = outer
         applyHeaderStyle()
     }
-    /// Breathe keeps Settings as a quiet gear and gives the header strip to
-    /// the panes: the gear and the activity spinner ride in the title bar.
-    /// The Settings menu item and ⌘, are unchanged.
+    /// Keep the pane action at the trailing edge; Breathe uses the title bar.
     private func applyHeaderStyle() {
         let quiet = InterfaceStyle.isBreathe
-        settingsButton.imagePosition = quiet ? .imageOnly : .imageLeading
-        settingsButton.isBordered = !quiet
-        settingsButton.contentTintColor = quiet ? FeedPalette.muted : FeedPalette.text
-        settingsButton.setAccessibilityLabel("Settings")
-        settingsWidth?.constant = quiet ? 28 : 110
-        settingsHeight?.constant = quiet ? 24 : 32
+        settingsButton.contentTintColor = FeedPalette.text
+        addPaneButton.needsDisplay = true
         // The body joins the backdrop the pane cards float on.
         bodySurface.fill = quiet ? FeedPalette.backdrop : FeedPalette.canvas
         guard let window, let header = headerRow else { return }
         if quiet, titlebarControls == nil {
-            for view in [activity, settingsButton] { header.removeArrangedSubview(view); view.removeFromSuperview() }
-            let controls = NSStackView(views: [activity, settingsButton])
+            for view in [settingsButton, addPaneButton] { header.removeArrangedSubview(view); view.removeFromSuperview() }
+            let controls = NSStackView(views: [settingsButton, addPaneButton])
             controls.orientation = .horizontal; controls.alignment = .centerY; controls.spacing = 8
             controls.translatesAutoresizingMaskIntoConstraints = false
-            let holder = NSView(frame: NSRect(x: 0, y: 0, width: 72, height: 28))
+            let holder = NSView(frame: NSRect(x: 0, y: 0, width: 278, height: 36))
             holder.addSubview(controls)
             NSLayoutConstraint.activate([
                 controls.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: -12),
@@ -370,8 +354,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                 window.removeTitlebarAccessoryViewController(at: index)
             }
             titlebarControls = nil
-            for view in [activity, settingsButton] { view.removeFromSuperview() }
-            header.insertArrangedSubview(activity, at: 0); header.addArrangedSubview(settingsButton)
+            for view in [settingsButton, addPaneButton] { view.removeFromSuperview() }
+            header.addArrangedSubview(settingsButton); header.addArrangedSubview(addPaneButton)
             header.isHidden = false; headerHeight?.constant = 40
         }
     }
@@ -703,6 +687,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             Breathe.popClosed(column.view, over: paneCanvas.view)
             paneCanvas.softenTopologyChange(duration: 0.2)
         }
+        // A removed pane must release its transcript and working indicator too.
+        column.display(nil)
         column.view.removeFromSuperview(); column.removeFromParent()
         columnStore.removeValue(forKey: column.columnID)
         paneLayout = remaining
@@ -820,6 +806,11 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             let visibleSessions = sessions.filter { visible.contains($0.id) }
             threadSummaries.schedule(visibleSessions, generate: { [weak self] session, input in
                 guard let self else { throw CancellationError() }
+                if session.provider == .gemini {
+                    // Keep the prompt-derived title; do not launch another CLI
+                    // with tools just to generate a sidebar label.
+                    return session.title
+                }
                 if session.provider == .local {
                     return try await ChatThreadSummary.generateLocally(input: input, model: session.inferenceSettings.model, registry: self.localModels)
                 }
@@ -894,7 +885,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private func refreshActivity() {
         activityTimer?.invalidate(); activityTimer = nil
         if session?.turn != nil {
-            activity.startAnimation(nil); sendButton.title = "Steer  ↵"
+            sendButton.title = "Steer  ↵"
             if startedAt == nil { startedAt = Date() }
             activityTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
                 Task { @MainActor in
@@ -902,7 +893,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                     self.activePane?.status.stringValue = "Working · \(Int(Date().timeIntervalSince(start)))s"
                 }
             }
-        } else { activity.stopAnimation(nil); sendButton.title = "Send  ↵"; startedAt = nil }
+        } else { sendButton.title = "Send  ↵"; startedAt = nil }
     }
     @objc func selectPreviousTab(_ sender: Any?) { selectAdjacentTab(offset: -1) }
     @objc func selectNextTab(_ sender: Any?) { selectAdjacentTab(offset: 1) }
@@ -1196,6 +1187,9 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     }
 
     private func loadHistoryIfNeeded(_ session: Session) {
+        // Gemini conversations already have their native saved feed. Do not
+        // start a Codex history reader for a different provider's session ID.
+        guard session.provider != .gemini else { return }
         guard historyEnabled, !stopped, session.thread != nil, session.turn == nil, historyLoads[session.id] == nil else { return }
         for column in columns where column.session === session { column.stream.status.stringValue = "Loading previous conversation…" }
         historyLoads[session.id] = Task { @MainActor [weak self] in
@@ -1268,6 +1262,10 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                     }
                     return
                 }
+                if provider == .gemini {
+                    self.modelCatalog.update(ModelCatalog.geminiRecords, for: .gemini)
+                    return
+                }
                 let executable = try provider == .claude ? ClaudeConnection.executable() : self.executable(allowPrompt: false)
                 let list = try await ProviderModelDiscovery.models(for: provider, executable: executable)
                 try Task.checkCancellation()
@@ -1294,7 +1292,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         alert.informativeText = "Enter the model ID supplied by your provider. It will be saved in this provider’s model list."
         alert.addButton(withTitle: "Add Model"); alert.addButton(withTitle: "Cancel")
         let id = NSTextField(), name = NSTextField()
-        id.placeholderString = provider == .claude ? "claude-fable-5-2" : provider == .local ? "ollama|llama3.2" : "Model ID"
+        id.placeholderString = provider == .claude ? "claude-fable-5-2" : provider == .gemini ? "gemini-4-carbon" : provider == .local ? "ollama|llama3.2" : "Model ID"
         id.setAccessibilityLabel("Model ID"); name.setAccessibilityLabel("Display name (optional)")
         let fields = NSStackView(views: [NSTextField(labelWithString: "Model ID"), id, NSTextField(labelWithString: "Display name (optional)"), name])
         fields.orientation = .vertical; fields.alignment = .leading; fields.spacing = 8
@@ -1341,7 +1339,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         let selectedModel = model.selectedItem?.representedObject as? String ?? ""
         let supportsFast = provider != .claude || InferenceSettings.supportsClaudeFastMode(selectedModel, in: models)
         // A local model has one speed: this Mac's.
-        speed.isHidden = provider == .local
+        speed.isHidden = [.local, .gemini].contains(provider)
         speed.removeAllItems()
         speed.autoenablesItems = false
         // Keep speed choices discoverable; sending checks runtime availability.
@@ -1369,7 +1367,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         if missingSelection { values.append(preferred) }
         effort.removeAllItems(); effort.addItems(withTitles: values)
         effort.selectItem(withTitle: preferred)
-        effort.isHidden = currentProvider == .local
+        effort.isHidden = [.local, .gemini].contains(currentProvider)
         effort.toolTip = missingSelection
             ? "Your saved effort is \(preferred). The latest model list doesn’t advertise it; choose another effort if the provider rejects it."
             : "Reasoning effort"
@@ -1464,6 +1462,10 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             guard let self, let session else { throw CancellationError() }
             // A local model needs no executable, sign-in or Internet.
             if session.provider == .local { try await session.connectLocal(); return }
+            if session.provider == .gemini {
+                try await session.connect(GeminiConnection.executable())
+                return
+            }
             let executable = try session.provider == .claude ? ClaudeConnection.executable() : self.executable(allowPrompt: false)
             try await session.connect(executable)
             guard try await session.isAuthenticated() else {
@@ -1660,6 +1662,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     }
 
     private func updateSplitAvailability() {
+        addPaneButton.isEnabled = canSplit(focusedColumn, on: .right)
         for column in columns {
             column.updateSplitAvailability(split: canSplit(column, on: .right), stack: canSplit(column, on: .bottom))
         }
@@ -1915,7 +1918,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     }
     @objc func showSample(_ sender: Any?) {
         rememberProject(); closeSplit()
-        sampleTimer?.invalidate(); activityTimer?.invalidate(); activity.stopAnimation(nil); selected = nil; heading.stringValue = "Sample · how ThoughtStream works"
+        sampleTimer?.invalidate(); activityTimer?.invalidate(); selected = nil; heading.stringValue = "Sample · how ThoughtStream works"
         for item in streamSplit.splitViewItems { streamSplit.removeSplitViewItem(item) }
         primaryColumn.display(nil)
         let pane = primaryColumn.stream; activePane = pane; samplePane = pane; streamSplit.addSplitViewItem(NSSplitViewItem(viewController: primaryColumn))

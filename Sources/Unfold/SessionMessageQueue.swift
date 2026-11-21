@@ -50,7 +50,7 @@ extension Session {
     }
 
     /// Codex's socket and local models live on this Mac. Claude needs the Internet to reattach.
-    private var canConnectNow: Bool { provider != .claude || queueConnectivity.isOnline }
+    private var canConnectNow: Bool { ![.claude, .gemini].contains(provider) || queueConnectivity.isOnline }
     /// A local model can answer with no Internet at all.
     private var canSendNow: Bool { !provider.needsInternet || queueConnectivity.isOnline }
 
@@ -118,7 +118,7 @@ extension Session {
         while let message = outbox.pending, queueConnection != nil, !Task.isCancelled {
             guard canSendNow, message.state != .blocked else { return }
             // A local model cannot be steered mid-turn; the message follows it.
-            if provider == .local, turn != nil { return }
+            if [.local, .gemini].contains(provider), turn != nil { return }
             do {
                 if await wasQueuedSteerRejected(message) {
                     try Task.checkCancellation()
@@ -252,6 +252,9 @@ extension Session {
         case .local:
             // The request lived in this process; an interrupted one never finished.
             return .notDelivered
+        case .gemini:
+            // Missing CLI output is not proof a cloud request was rejected.
+            return .unknown
         }
     }
 
@@ -274,6 +277,7 @@ extension Session {
     /// whether this is the first retry of that message.
     func retryDroppedTurn(status: String, error: String?) -> Bool? {
         defer { resendCandidate = nil }
+        guard provider != .gemini else { return nil }
         guard let candidate = resendCandidate, status == "failed", !turnHadActivity, let error,
               MessageOutbox.isTransientFailure(message: error) || (provider.needsInternet && queueConnectivity.isOffline) else { return nil }
         let attempts = max(1, outbox.messages.first { $0.id == candidate.id }?.attempts ?? candidate.attempts ?? 1)

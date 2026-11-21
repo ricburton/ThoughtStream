@@ -7,6 +7,8 @@ enum LocalModelDiskScanner {
                        home: URL = FileManager.default.homeDirectoryForCurrentUser,
                        environment: [String: String] = ProcessInfo.processInfo.environment) -> [LocalModel] {
         switch runtime.key {
+        case "llamacpp":
+            return InklingLocalModel.model(home: home).map { [$0] } ?? []
         case "ollama":
             let configured = environment["OLLAMA_MODELS"].flatMap { $0.isEmpty ? nil : $0 }
             let root = configured.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }

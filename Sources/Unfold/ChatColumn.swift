@@ -2,7 +2,58 @@ import AppKit
 import QuartzCore
 
 @MainActor
-private final class TabScrollView: NSScrollView {
+final class TabScrollView: NSScrollView {
+    private let leftIndicator = TabOverflowButton()
+    private let rightIndicator = TabOverflowButton()
+    private let gutter: CGFloat = 14
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        for (button, label, action) in [
+            (leftIndicator, "Show more tabs to the left", #selector(showLeftTabs)),
+            (rightIndicator, "Show more tabs to the right", #selector(showRightTabs))
+        ] {
+            button.title = ""; button.isBordered = false
+            button.target = self; button.action = action
+            button.toolTip = label; button.setAccessibilityLabel(label)
+            button.isHidden = true
+            addSubview(button)
+        }
+    }
+    required init?(coder: NSCoder) { fatalError("Not implemented") }
+
+    override func tile() {
+        super.tile()
+        // Stable gutters keep the indicators clear of titles and prevent the
+        // available tab width changing when an edge indicator appears.
+        let clip = contentView.frame
+        let inset = min(gutter, clip.width / 2)
+        contentView.frame = clip.insetBy(dx: inset, dy: 0)
+        leftIndicator.frame = NSRect(x: clip.minX, y: clip.minY, width: inset, height: clip.height)
+        rightIndicator.frame = NSRect(x: clip.maxX - inset, y: clip.minY, width: inset, height: clip.height)
+        updateOverflowIndicators()
+    }
+
+    func updateOverflowIndicators() {
+        let visible = contentView.bounds
+        let width = documentView?.frame.width ?? 0
+        leftIndicator.isHidden = visible.minX <= 0.5 || width <= visible.width + 0.5
+        rightIndicator.isHidden = visible.maxX >= width - 0.5
+    }
+
+    override func reflectScrolledClipView(_ clipView: NSClipView) {
+        super.reflectScrolledClipView(clipView)
+        updateOverflowIndicators()
+    }
+
+    @objc private func showLeftTabs() { revealTabs(direction: -1) }
+    @objc private func showRightTabs() { revealTabs(direction: 1) }
+    private func revealTabs(direction: CGFloat) {
+        let limit = max(0, (documentView?.frame.width ?? 0) - contentView.bounds.width)
+        let x = min(limit, max(0, contentView.bounds.minX + direction * max(1, contentView.bounds.width * 0.75)))
+        contentView.scroll(to: NSPoint(x: x, y: 0))
+        reflectScrolledClipView(contentView)
+    }
     /// Clicks on tabs never reach the strip; only its empty part does.
     var onEmptyDoubleClick: (() -> Bool)?
     override func mouseDown(with event: NSEvent) {
@@ -24,6 +75,18 @@ private final class TabScrollView: NSScrollView {
         let x = min(limit, max(0, contentView.bounds.minX - distance))
         contentView.scroll(to: NSPoint(x: x, y: 0))
         reflectScrolledClipView(contentView)
+    }
+}
+
+@MainActor
+private final class TabOverflowButton: NSButton {
+    override func draw(_ dirtyRect: NSRect) {
+        (isHighlighted ? FeedPalette.text : FeedPalette.muted).setFill()
+        NSBezierPath(roundedRect: NSRect(x: bounds.midX - 1.5, y: bounds.midY - 9, width: 3, height: 18),
+                     xRadius: 1, yRadius: 1).fill()
+    }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance(); needsDisplay = true
     }
 }
 
@@ -130,13 +193,13 @@ final class ChatTabButton: NSButton {
         }
         let style = NSMutableParagraphStyle(); style.lineBreakMode = .byTruncatingTail; style.alignment = .left
         let label = NSAttributedString(string: title, attributes: [.font: selected ? Typography.interfaceEmphasis : Typography.interface, .foregroundColor: selected || isHovering ? FeedPalette.text : FeedPalette.muted, .paragraphStyle: style])
-        let leading: CGFloat = isRunning ? 24 : 12
-        let trailing: CGFloat = selected || isHovering ? 26 : 10
+        let leading: CGFloat = isRunning ? 28 : 16
+        let trailing: CGFloat = selected || isHovering ? 30 : 14
         let labelHeight = ceil(label.size().height)
         label.draw(in: NSRect(x: leading, y: (bounds.height - labelHeight) / 2, width: max(0, bounds.width - leading - trailing), height: labelHeight))
         if isRunning {
             FeedPalette.blue.setFill()
-            NSBezierPath(ovalIn: NSRect(x: 11, y: (bounds.height - 6) / 2, width: 6, height: 6)).fill()
+            NSBezierPath(ovalIn: NSRect(x: 15, y: (bounds.height - 6) / 2, width: 6, height: 6)).fill()
         }
         if window?.firstResponder === self {
             NSColor.keyboardFocusIndicatorColor.setStroke()
@@ -155,12 +218,12 @@ final class ChatTabButton: NSButton {
         }
         let style = NSMutableParagraphStyle(); style.lineBreakMode = .byTruncatingTail; style.alignment = .left
         let label = NSAttributedString(string: title, attributes: [.font: state == .on ? Typography.interfaceEmphasis : Typography.interface, .foregroundColor: state == .on ? FeedPalette.text : FeedPalette.muted, .paragraphStyle: style])
-        let leading: CGFloat = isRunning ? 27 : 14
+        let leading: CGFloat = isRunning ? 31 : 18
         let labelHeight = ceil(label.size().height)
-        label.draw(in: NSRect(x: leading, y: (bounds.height - labelHeight) / 2, width: max(0, bounds.width - leading - 34), height: labelHeight))
+        label.draw(in: NSRect(x: leading, y: (bounds.height - labelHeight) / 2, width: max(0, bounds.width - leading - 38), height: labelHeight))
         if isRunning {
             FeedPalette.blue.setFill()
-            NSBezierPath(ovalIn: NSRect(x: 13, y: (bounds.height - 6) / 2, width: 6, height: 6)).fill()
+            NSBezierPath(ovalIn: NSRect(x: 17, y: (bounds.height - 6) / 2, width: 6, height: 6)).fill()
         }
         if window?.firstResponder === self {
             NSColor.keyboardFocusIndicatorColor.setStroke()
@@ -269,6 +332,7 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
     private var cardBottom: NSLayoutConstraint!
     private var tabsInline = false
     private var tabNaturalWidths: [CGFloat] = []
+    private var tabMinimumWidths: [CGFloat] = []
     private var tabWidthConstraints: [NSLayoutConstraint] = []
     private var selectedTabPosition: Int?
     private var fittedTabRoom: CGFloat = 0
@@ -415,7 +479,7 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
             self.paneControls = paneControls; paneControlsHeight = controlsHeight; tabScrollWidth = scrollWidth
         }
         tabBarStack = tabBar
-        tabScroll.heightAnchor.constraint(equalToConstant: 38).isActive = true
+        tabScroll.heightAnchor.constraint(equalToConstant: 44).isActive = true
         let scroll = NSScrollView(); scroll.documentView = prompt; scroll.hasVerticalScroller = true
         scroll.drawsBackground = false; scroll.borderType = .noBorder
         prompt.drawsBackground = false; prompt.font = InterfaceStyle.isMatrix ? Typography.prose(ofSize: Typography.conversation.pointSize) : Typography.conversation; if InterfaceStyle.isMatrix { prompt.insertionPointColor = FeedPalette.green }; prompt.textColor = FeedPalette.text; prompt.isRichText = false
@@ -499,7 +563,7 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
         cardHeight = card.heightAnchor.constraint(equalToConstant: 120)
         attachmentHeight = attachmentScroll.heightAnchor.constraint(equalToConstant: 0)
         tabBarTop = tabBar.topAnchor.constraint(equalTo: view.topAnchor, constant: 4)
-        tabBarHeight = tabBar.heightAnchor.constraint(equalToConstant: tabsOnly ? 38 : 72)
+        tabBarHeight = tabBar.heightAnchor.constraint(equalToConstant: tabsOnly ? 44 : 78)
         streamTop = stream.view.topAnchor.constraint(equalTo: tabBar.bottomAnchor, constant: 2)
         cardBottom = card.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8)
         NSLayoutConstraint.activate([
@@ -537,9 +601,9 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
         moreButton.isHidden = !breathe
         newButton.isQuiet = breathe
         tabs.spacing = breathe ? Breathe.tabSpacing : 6
-        tabBarTop.constant = breathe ? Breathe.tabTopInset : 4
-        streamTop.constant = breathe ? 4 : 2
-        cardBottom.constant = breathe ? -Breathe.composerBottom : -8
+        tabBarTop.constant = breathe ? Breathe.tabTopInset : 8
+        streamTop.constant = 8
+        cardBottom.constant = breathe ? -Breathe.composerBottom : -12
         if breathe != tabsInline, let paneControls, let tabBar = tabBarStack {
             tabsInline = breathe
             if breathe {
@@ -553,8 +617,8 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
                 tabScrollWidth?.isActive = true
             }
             paneControls.spacing = breathe ? 8 : 0
-            paneControlsHeight?.constant = breathe ? 38 : 30
-            tabBarHeight.constant = breathe ? 38 : 72
+            paneControlsHeight?.constant = breathe ? 44 : 30
+            tabBarHeight.constant = breathe ? 44 : 78
         }
         stopButton.isHidden = breathe && session?.turn == nil
         updateTabs(shownTabs, isSplit: shownSplit)
@@ -566,13 +630,15 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
         var widths = tabNaturalWidths
         fittedTabRoom = tabScroll.contentSize.width
         if breathe, fittedTabRoom > 0 {
-            widths = Breathe.tabWidths(widths, available: fittedTabRoom, spacing: tabs.spacing, minimum: Breathe.tabMinimum)
+            widths = Breathe.tabWidths(widths, available: fittedTabRoom, spacing: tabs.spacing,
+                                      minimum: Breathe.tabMinimum, minimums: tabMinimumWidths)
         }
         for (constraint, width) in zip(tabWidthConstraints, widths) where constraint.constant != width { constraint.constant = width }
         let total = widths.reduce(0, +) + tabs.spacing * CGFloat(max(0, widths.count - 1))
-        tabs.frame = NSRect(x: 0, y: 0, width: max(1, total), height: 38)
+        tabs.frame = NSRect(x: 0, y: 0, width: max(1, total), height: 44)
+        tabScroll.updateOverflowIndicators()
         guard breathe, let position = selectedTabPosition else { tabSelection.isHidden = true; return }
-        tabSelection.move(to: Breathe.tabFrame(at: position, widths: widths, spacing: tabs.spacing, height: 38), animated: slidingSelection)
+        tabSelection.move(to: Breathe.tabFrame(at: position, widths: widths, spacing: tabs.spacing, height: 44), animated: slidingSelection)
         tabSelection.isHidden = false
     }
 
@@ -726,6 +792,7 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
     func updateFocusAppearance(active: Bool) {
         loadViewIfNeeded()
         isActivePane = active
+        sendButton.alphaValue = active ? 1 : 0.7
         // Focus belongs to the message box, not a wash over the entire chat.
         let background = FeedPalette.canvas
         (view as? WorkspaceSurface)?.fill = background
@@ -752,7 +819,7 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
         closePaneButton.isEnabled = isSplit
         for child in tabs.arrangedSubviews { tabs.removeArrangedSubview(child); child.removeFromSuperview() }
         let breathe = InterfaceStyle.isBreathe
-        tabNaturalWidths = []; tabWidthConstraints = []; selectedTabPosition = nil
+        tabNaturalWidths = []; tabMinimumWidths = []; tabWidthConstraints = []; selectedTabPosition = nil
         var selectedItem: ChatTabItem?
         for (index, chat) in chats {
             let title = ChatTabTitle.display(chat.title)
@@ -761,14 +828,12 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
                                    onDragEnded: { [weak self] in self?.onTabDragEnded?() },
                                    onSelect: { [weak self] in self?.onSelectChat?(index) },
                                    onClose: { [weak self] in self?.onCloseChat?(index) })
-            let titleWidth = (title as NSString).size(withAttributes: [.font: Typography.interfaceEmphasis]).width
-            let running: CGFloat = chat.turn == nil ? 0 : 13
-            let length = breathe ? min(Breathe.tabMaximum, max(Breathe.tabMinimum + 12, ceil(titleWidth) + 42 + running))
-                : min(240, max(116, ceil(titleWidth) + 46 + running))
+            let sizing = ChatTabLayout.widths(title: title, breathe: breathe, running: chat.turn != nil)
+            let length = sizing.natural
             let width = item.widthAnchor.constraint(equalToConstant: length)
-            tabs.addArrangedSubview(item); width.isActive = true; item.heightAnchor.constraint(equalToConstant: 38).isActive = true
+            tabs.addArrangedSubview(item); width.isActive = true; item.heightAnchor.constraint(equalToConstant: 44).isActive = true
             if chat === session { selectedItem = item; selectedTabPosition = tabNaturalWidths.count }
-            tabNaturalWidths.append(length); tabWidthConstraints.append(width)
+            tabNaturalWidths.append(length); tabMinimumWidths.append(sizing.minimum); tabWidthConstraints.append(width)
         }
         fitTabs(slidingSelection: true)
         if revealedSessionID != session?.id {

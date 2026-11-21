@@ -331,8 +331,8 @@ final class ConversationView: NativeFeedCard, NSTextViewDelegate {
 /// doing and for how long. Static under Reduce Motion.
 @MainActor
 final class ConversationWorkingIndicator: NSView {
-    static let height: CGFloat = 26
-    static let bottomMargin: CGFloat = 10
+    static let height: CGFloat = 32
+    static let bottomMargin: CGFloat = 14
     var detail: (() -> String?)?
     var onFinished: (() -> Void)?
     private let bubble = NSView()
@@ -358,7 +358,7 @@ final class ConversationWorkingIndicator: NSView {
         NSLayoutConstraint.activate([
             bubble.leadingAnchor.constraint(equalTo: leadingAnchor), bubble.topAnchor.constraint(equalTo: topAnchor), bubble.bottomAnchor.constraint(equalTo: bottomAnchor),
             bubble.widthAnchor.constraint(equalToConstant: 50),
-            label.leadingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: 10), label.trailingAnchor.constraint(equalTo: trailingAnchor),
+            label.leadingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: 14), label.trailingAnchor.constraint(equalTo: trailingAnchor),
             label.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
         setAccessibilityElement(true); setAccessibilityRole(.staticText)

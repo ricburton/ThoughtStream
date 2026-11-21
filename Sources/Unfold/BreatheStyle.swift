@@ -6,13 +6,13 @@ import QuartzCore
 /// live following is implied: scroll up to read, come back down (or use the
 /// Latest pill) to follow again. Panes are cards that spring open and closed.
 enum Breathe {
-    static let tabTopInset: CGFloat = 8
-    static let tabSpacing: CGFloat = 2
+    static let tabTopInset: CGFloat = 12
+    static let tabSpacing: CGFloat = 6
     static let tabRadius: CGFloat = 9
     static let tabMinimum: CGFloat = 76
     static let tabMaximum: CGFloat = 220
-    static let statusHeight: CGFloat = 20
-    static let composerBottom: CGFloat = 12
+    static let statusHeight: CGFloat = 28
+    static let composerBottom: CGFloat = 16
     static let sidebarRowHeight: CGFloat = 34
 
     @MainActor private static var reducesMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
@@ -20,15 +20,18 @@ enum Breathe {
     /// Long titles give way first, so short ones stay whole. The strip only
     /// scrolls once every tab is down to its minimum.
     static func tabWidths(_ natural: [CGFloat], available: CGFloat, spacing: CGFloat,
-                                      minimum: CGFloat = 76) -> [CGFloat] {
+                                      minimum: CGFloat = 76, minimums: [CGFloat]? = nil) -> [CGFloat] {
+        let floors = natural.indices.map { index in
+            minimums.flatMap { $0.indices.contains(index) ? $0[index] : nil } ?? minimum
+        }
         let room = available - spacing * CGFloat(max(0, natural.count - 1))
         guard room > 0, natural.reduce(0, +) > room else { return natural }
-        var low = minimum, high = max(minimum, natural.max() ?? minimum)
+        var low: CGFloat = 0, high = max(minimum, natural.max() ?? minimum)
         for _ in 0..<24 {
             let cap = (low + high) / 2
-            if natural.reduce(0, { $0 + max(minimum, min($1, cap)) }) > room { high = cap } else { low = cap }
+            if zip(natural, floors).reduce(0, { $0 + max($1.1, min($1.0, cap)) }) > room { high = cap } else { low = cap }
         }
-        return natural.map { max(minimum, min($0, low).rounded(.down)) }
+        return zip(natural, floors).map { max($0.1, min($0.0, low).rounded(.down)) }
     }
 
     /// The selected tab's frame inside the strip, without waiting for layout.
@@ -128,15 +131,7 @@ final class BreatheTabSelection: NSView {
     required init?(coder: NSCoder) { fatalError("Not implemented") }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func draw(_ dirtyRect: NSRect) {
-        let rect = bounds.insetBy(dx: 0.5, dy: 4)
-        guard rect.width > 0, rect.height > 0 else { return }
-        let shape = NSBezierPath(roundedRect: rect, xRadius: Breathe.tabRadius, yRadius: Breathe.tabRadius)
-        FeedPalette.text.withAlphaComponent(0.075).setFill()
-        shape.fill()
-        if NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast {
-            FeedPalette.text.withAlphaComponent(0.5).setStroke()
-            shape.lineWidth = 1; shape.stroke()
-        }
+        ChatChrome.drawSelectedTab(in: bounds, flipped: isFlipped)
     }
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance(); needsDisplay = true
@@ -144,7 +139,7 @@ final class BreatheTabSelection: NSView {
 
     /// Move to a tab; slide there when the selection changed while on screen.
     func move(to frame: NSRect, animated: Bool) {
-        let slide = animated && !isHidden && self.frame.width > 0 && window != nil
+        let slide = animated && !isHidden && self.frame.width > 0 && window?.isVisible == true
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         guard slide else { self.frame = frame; needsDisplay = true; return }
         NSAnimationContext.runAnimationGroup { context in

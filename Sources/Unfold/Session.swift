@@ -31,6 +31,8 @@ final class Session {
     var forkSource: String?
     private var claude: ClaudeConnection?
     private var claudeSettings: InferenceSettings?
+    private var gemini: GeminiConnection?
+    private var geminiExecutable: URL?
     private var local: LocalModelConnection?
     /// Finds and starts local runtimes. Replaced in tests.
     var localModels = LocalModelRegistry.shared
@@ -439,6 +441,16 @@ final class Session {
 
     func connect(_ executable: URL, persistentRuntime: Bool = true) async throws {
         if ready { return }
+        if provider == .gemini {
+            let connection = GeminiConnection()
+            connection.onEvent = { [weak self] in self?.receive($0) }
+            connection.onSession = { [weak self] in self?.thread = $0; self?.save() }
+            gemini = connection; geminiExecutable = executable
+            intentionalStop = false; ready = true
+            onModels?(ModelCatalog.geminiRecords)
+            onStatus?("Gemini CLI ready · account access checked when sending")
+            return
+        }
         if provider == .claude { try await connectClaude(executable); return }
         if provider == .local { try await connectLocal(); return }
         guard !connecting else { throw CodexConnection.error("Codex is already connecting. Please try again when it is ready.") }
@@ -583,6 +595,9 @@ final class Session {
         save()
     }
     func isAuthenticated() async throws -> Bool {
+        // Gemini validates its own OAuth/API-key credentials when a turn starts.
+        // CLI readiness is deliberately not reported as authenticated.
+        if provider == .gemini { return false }
         if provider == .local { return true }
         if provider == .claude { return try await ClaudeConnection.isAuthenticated() }
         guard let client = client, ready else { return false }
@@ -590,6 +605,9 @@ final class Session {
         return (result["account"] as? [String: Any])?["type"] as? String == "chatgpt"
     }
     func loginIfNeeded() async throws {
+        if provider == .gemini {
+            throw CodexConnection.error("Run ‘gemini’ in Terminal and complete sign-in, then return here and send your message.")
+        }
         if provider == .local { onStatus?("Local models need no sign-in"); return }
         if provider == .claude {
             if try await isAuthenticated() { onStatus?("Claude Code connected"); return }
@@ -615,6 +633,10 @@ final class Session {
         return input
     }
     func send(_ prompt: String, attachments: [ChatAttachment] = [], model: String? = nil, effort: String? = nil, tier: String? = nil, queuedID: UUID? = nil) async throws {
+        if provider == .gemini {
+            try sendGemini(prompt, attachments: attachments, model: model, queuedID: queuedID)
+            return
+        }
         if provider == .claude {
             try await sendClaude(prompt, attachments: attachments, model: model, effort: effort, tier: tier, queuedID: queuedID)
             return
@@ -699,7 +721,34 @@ final class Session {
         }
         save()
     }
+    private func sendGemini(_ prompt: String, attachments: [ChatAttachment], model: String?, queuedID: UUID?) throws {
+        guard ready, let gemini, let executable = geminiExecutable else { throw CodexConnection.error("Connect Gemini CLI first.") }
+        guard turn == nil else { throw CodexConnection.error("Wait for Gemini to finish, or stop the current turn.") }
+        let settings = InferenceSettings(model: model ?? inferenceSettings.model, effort: "default", tier: "default")
+        do {
+            try gemini.send(prompt, attachments: attachments, executable: executable, project: project,
+                            model: settings.model, resume: thread) {
+                if let queuedID { try self.markQueueSubmitting(queuedID, baseline: nil) }
+            }
+        } catch {
+            // send only throws before a child launches, so no prompt was sent.
+            if let queuedID { try? outbox.update(queuedID, state: .queued) }
+            throw error
+        }
+        if queuedID == nil { setInferenceSettings(settings) }
+        if title == "New chat" { title = String((prompt.isEmpty ? attachments.first?.name ?? "Image chat" : prompt).prefix(50)) }
+        if queuedID == nil {
+            if !prompt.isEmpty { report(.user, prompt) }
+            for attachment in attachments { report(.user, Self.pretty(["type": "local_image", "path": attachment.path, "name": attachment.name])) }
+        }
+        save()
+    }
+
     func interrupt() async throws {
+        if provider == .gemini {
+            guard let gemini, turn != nil else { throw CodexConnection.error("No active turn.") }
+            gemini.interrupt(); return
+        }
         if provider == .local {
             guard let local, turn != nil else { throw CodexConnection.error("No active turn.") }
             local.interrupt(); return
@@ -734,6 +783,9 @@ final class Session {
         pending.forEach { onRequestResolved?($0) }
     }
     func fork() async throws -> Session {
+        if provider == .gemini {
+            throw CodexConnection.error("Gemini CLI does not support forking here yet. Start a new Gemini chat instead.")
+        }
         if provider == .local {
             guard turn == nil else { throw CodexConnection.error("Finish or stop the local model's turn before forking.") }
             // The fork rebuilds its context from this copied history on first send.
@@ -793,13 +845,14 @@ final class Session {
         turnWasInterrupted = turnWasInterrupted || turn != nil
         stopMessageQueue(); historyLoad?.cancel(); if isHistoryLoaded { save() }; flushProtocol(); persistence.sync {}
         client?.stop(terminateRuntime: !turnWasInterrupted)
-        claude?.stop(); local?.stop(); ready = false; turn = nil
+        claude?.stop(); gemini?.stop(); local?.stop(); ready = false; turn = nil
     }
     func disconnectForAccessChange(to mode: AccessMode) {
         connectionGeneration = UUID(); turnWasInterrupted = false
         reconnectRequested = false; reconnectTask?.cancel(); reconnectTask = nil
         let runtime = client; client = nil; ready = false; turn = nil
         runtime?.stop(terminateRuntime: true); claude?.stop(); claude = nil; local?.stop(); resolveAllRequests()
+        gemini?.stop(); gemini = nil
         settleRunningCommands(as: .interrupted)
         report(.system, "Access changed to \(mode.label). The \(provider.label) runtime was stopped. Existing file changes and independent background processes are not undone.")
         onStatus?(mode.label + " · disconnected")

@@ -28,7 +28,7 @@ final class RoundedPaneTests: XCTestCase {
             controller.applyInterfaceStyle()
             columns.forEach { $0.applyInterfaceStyle() }
             controller.view.layoutSubtreeIfNeeded()
-            let inset: CGFloat = style == .roundedPanes ? 8 : 0
+            let inset: CGFloat = style == .roundedPanes ? PaneSurface.inset : 0
             for column in columns {
                 let host = try XCTUnwrap(column.view.superview as? TabSplitHostView)
                 XCTAssertEqual(column.view.frame.minX, inset, accuracy: 0.5)

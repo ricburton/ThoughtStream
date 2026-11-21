@@ -7,6 +7,12 @@ struct InferenceSettings: Codable, Equatable {
 
     static let preferred = InferenceSettings(model: "gpt-6.1-sol", effort: "high", tier: "default")
     static let tiers = ["default", "fast", "ultrafast"]
+    // https://aistudio.google.com/docs/models — verified 2026-11-21.
+    static let geminiPreferredModel = "gemini-4-carbon"
+    static let geminiModels: [(id: String, name: String)] = [
+        ("gemini-4-carbon", "Gemini 4 Carbon"), ("gemini-4-neon", "Gemini 4 Neon"),
+        ("gemini-4-hydrogen", "Gemini 4 Hydrogen"), ("gemini-4-argon", "Gemini 4 Argon"),
+        ("gemini-3.8-flash", "Gemini 3.8 Flash")]
     /// Most capable Claude model; Claude Code's own list replaces this catalog once connected.
     static let claudePreferredModel = "claude-fable-5-2"
     static let claudeModels: [(id: String, name: String)] = [
@@ -19,7 +25,7 @@ struct InferenceSettings: Codable, Equatable {
     static func tiers(for provider: AgentProvider) -> [String] {
         switch provider {
         case .claude: return ["default", "fast"]
-        case .local: return ["default"]
+        case .local, .gemini: return ["default"]
         case .codex: return tiers
         }
     }
@@ -63,6 +69,10 @@ struct InferenceSettings: Codable, Equatable {
         return name == "opus" || name.range(of: #"^(?:claude-)?opus-(?:4[.-]8|5(?:[.-]5)?)(?:-\d{8})?$"#, options: .regularExpression) != nil
     }
     static func load(from defaults: UserDefaults = .standard, provider: AgentProvider = .codex) -> InferenceSettings {
+        if provider == .gemini {
+            return InferenceSettings(model: defaults.string(forKey: "thoughtstream.gemini.model") ?? geminiPreferredModel,
+                                     effort: "default", tier: "default")
+        }
         if provider == .local {
             // Empty until a local model is chosen; the first one found is used then.
             return InferenceSettings(model: defaults.string(forKey: "thoughtstream.local.model") ?? "", effort: "default", tier: "default")
@@ -90,6 +100,10 @@ struct InferenceSettings: Codable, Equatable {
         return saved
     }
     func save(to defaults: UserDefaults = .standard, provider: AgentProvider = .codex) {
+        if provider == .gemini {
+            defaults.set(model, forKey: "thoughtstream.gemini.model")
+            return
+        }
         if provider == .local {
             if !model.isEmpty { defaults.set(model, forKey: "thoughtstream.local.model") }
             return
@@ -106,6 +120,7 @@ struct InferenceSettings: Codable, Equatable {
         defaults.set(tier, forKey: "unfold.inference.tier")
     }
     var displayName: String {
+        if let name = Self.geminiModels.first(where: { $0.id == model })?.name { return name }
         if model == "gpt-6.1-sol" { return "GPT-6.1 Sol" }
         if LocalModel.split(model) != nil { return LocalModel.shortName(model) }
         return Self.claudeModels.first { $0.id == model }?.name ?? model

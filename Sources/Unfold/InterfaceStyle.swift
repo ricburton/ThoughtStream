@@ -1,14 +1,14 @@
 import AppKit
 
 /// Whole-window looks. Rounded Panes and Matrix are experimental alternatives;
-/// Breathe is the standard look with less chrome and more air (see `Breathe`).
+/// Breathe is the default look with less chrome and more air (see `Breathe`).
 enum InterfaceStyle: String, CaseIterable {
     case standard, matrix, roundedPanes, breathe
 
     static let didChange = Notification.Name("ThoughtStream.interfaceStyleDidChange")
     private static let key = "unfold.interfaceStyle"
     // Dynamic palette colors read this on every resolution; keep it in memory.
-    private static var stored = InterfaceStyle(rawValue: UserDefaults.standard.string(forKey: key) ?? "") ?? .standard
+    private static var stored = InterfaceStyle(rawValue: UserDefaults.standard.string(forKey: key) ?? "") ?? .breathe
 
     static var current: InterfaceStyle {
         get { stored }

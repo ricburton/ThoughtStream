@@ -82,10 +82,11 @@ final class BreatheStyleTests: XCTestCase {
         XCTAssertEqual(breatheStrip.midY, row.midY, accuracy: 1)
         XCTAssertLessThan(breatheStrip.maxX, row.minX)
         XCTAssertGreaterThan(column.stream.view.frame.maxY, standardStreamTop + 20)
-        // Every tab is visible at once; only the long title is shortened.
+        // Titles retain their first three words, so a crowded row scrolls.
         let tabs = descendants(column.view).compactMap { $0 as? ChatTabItem }
         XCTAssertEqual(tabs.count, 3)
-        XCTAssertLessThanOrEqual(tabs.map(\.frame.maxX).max() ?? 0, strip.contentSize.width + 0.5)
+        XCTAssertGreaterThan(tabs.map(\.frame.maxX).max() ?? 0, strip.contentSize.width)
+        XCTAssertFalse(try XCTUnwrap(button("Show more tabs to the right", in: strip)).isHidden)
         XCTAssertLessThan(tabs[1].frame.width, Breathe.tabMaximum)
         let selection = try XCTUnwrap(descendants(column.view).first { $0 is BreatheTabSelection })
         XCTAssertFalse(selection.isHidden)
@@ -181,21 +182,33 @@ final class BreatheStyleTests: XCTestCase {
         }
         XCTAssertEqual(open[0].tabIDs, chats.map(\.id))
 
-        // Settings rides in the title bar, so the panes start right beneath it
+        // Add Pane rides in the title bar, so the panes start right beneath it
         // and return below the header strip in the standard look.
         let content = try XCTUnwrap(workspace.window?.contentView)
-        func settings() throws -> NSButton {
+        func addPane() throws -> NSButton {
             let frame = try XCTUnwrap(content.superview)
-            return try XCTUnwrap(descendants(frame).compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "Settings" })
+            return try XCTUnwrap(descendants(frame).compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "Add Pane" })
         }
         func paneTop() -> CGFloat { content.bounds.maxY - open[0].view.convert(open[0].view.bounds, to: content).maxY }
-        XCTAssertFalse(try settings().isDescendant(of: content))
+        let frame = try XCTUnwrap(content.superview)
+        let settings = try XCTUnwrap(button("Settings", in: frame))
+        XCTAssertFalse(settings.isDescendant(of: content))
+        let settingsFrame = settings.convert(settings.bounds, to: frame)
+        let addFrame = try addPane().convert(addPane().bounds, to: frame)
+        XCTAssertLessThan(settingsFrame.maxX, addFrame.minX)
+        XCTAssertFalse(descendants(try XCTUnwrap(settings.superview)).contains { $0 is NSProgressIndicator })
+        XCTAssertTrue(settings.isBordered)
+        XCTAssertEqual(settings.imagePosition, .imageLeading)
+        XCTAssertNotNil(settings.image)
+        XCTAssertEqual(try addPane().action, #selector(WorkspaceWindow.splitStream(_:)))
+        XCTAssertFalse(try addPane().isDescendant(of: content))
         XCTAssertEqual(workspace.window?.titlebarAccessoryViewControllers.count, 1)
         let breatheTop = paneTop()
         InterfaceStyle.current = .standard
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))
         content.layoutSubtreeIfNeeded()
-        XCTAssertTrue(try settings().isDescendant(of: content))
+        XCTAssertTrue(try addPane().isDescendant(of: content))
+        XCTAssertTrue(settings.isDescendant(of: content))
         XCTAssertEqual(workspace.window?.titlebarAccessoryViewControllers.count, 0)
         XCTAssertGreaterThan(paneTop(), breatheTop + 20)
         InterfaceStyle.current = .breathe

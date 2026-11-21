@@ -89,19 +89,20 @@ final class CoordinatedPaneResizeTests: XCTestCase {
         for style in [InterfaceStyle.standard, .roundedPanes] {
             InterfaceStyle.current = style
             for vertical in [true, false] {
+                // Leave enough vertical room to test redistribution without hitting the padded chrome minimum.
                 let ids = (0..<4).map { _ in UUID() }
-                let fixture = Fixture(ids: ids, layout: chain(ids[...], vertical: vertical), size: NSSize(width: 2003, height: 2003))
+                let fixture = Fixture(ids: ids, layout: chain(ids[...], vertical: vertical), size: NSSize(width: 2403, height: 2403))
                 defer { fixture.close() }
                 let column = fixture.columns[1]
                 column.prompt.string = "Preserve draft and selection"
                 column.prompt.setSelectedRange(NSRange(location: 9, length: 5))
                 let fraction = column.conversationFraction
                 let stream = column.stream
-                check(fixture.sizes(vertical: vertical), [500, 500, 500, 500])
+                check(fixture.sizes(vertical: vertical), [600, 600, 600, 600])
                 // This is the deepest split: without coordination only panes 3
-                // and 4 would resize. The first three must share 1,590 points.
+                // and 4 would resize. The first three must share 1,890 points.
                 try drag(fixture.splits.last!, fixture: fixture, deltas: [20, 60, 90])
-                check(fixture.sizes(vertical: vertical), [530, 530, 530, 410])
+                check(fixture.sizes(vertical: vertical), [630, 630, 630, 510])
                 XCTAssertTrue(column.stream === stream)
                 XCTAssertEqual(column.prompt.string, "Preserve draft and selection")
                 XCTAssertEqual(column.prompt.selectedRange(), NSRange(location: 9, length: 5))
@@ -109,15 +110,15 @@ final class CoordinatedPaneResizeTests: XCTestCase {
                 XCTAssertEqual(fixture.controller.snapshot.ids, ids)
                 // Resize the window: maintain the user's distribution, not the
                 // binary tree's arbitrary nesting or a single stretchy pane.
-                fixture.resize(NSSize(width: 2403, height: 2403))
-                check(fixture.sizes(vertical: vertical), [636, 636, 636, 492])
-                fixture.resize(NSSize(width: 1803, height: 1803))
-                fixture.resize(NSSize(width: 2403, height: 2403))
-                check(fixture.sizes(vertical: vertical), [636, 636, 636, 492])
+                fixture.resize(NSSize(width: 2883, height: 2883))
+                check(fixture.sizes(vertical: vertical), [756, 756, 756, 612])
+                fixture.resize(NSSize(width: 2643, height: 2643))
+                fixture.resize(NSSize(width: 2883, height: 2883))
+                check(fixture.sizes(vertical: vertical), [756, 756, 756, 612])
                 // All boundaries clamp at the content minimum plus style inset.
                 let fitting = column.view.fittingSize
                 let minimum = (vertical ? max(260, ceil(fitting.width)) : max(300, ceil(fitting.height)))
-                    + (style == .roundedPanes ? 16 : 0)
+                    + (style == .roundedPanes ? 2 * PaneSurface.inset : 0)
                 fixture.splits[0].setPosition(-1000, ofDividerAt: 0)
                 XCTAssertEqual(fixture.sizes(vertical: vertical)[0], minimum, accuracy: 1)
                 fixture.splits.last!.setPosition(10000, ofDividerAt: 0)
@@ -131,14 +132,14 @@ final class CoordinatedPaneResizeTests: XCTestCase {
         let ids = (0..<6).map { _ in UUID() }
         let layout = PaneLayout.split(vertical: false, fraction: 0.5,
             first: chain(ids[0..<3], vertical: true), second: chain(ids[3..<6], vertical: true))
-        let fixture = Fixture(ids: ids, layout: layout, size: NSSize(width: 1502, height: 1001))
+        let fixture = Fixture(ids: ids, layout: layout, size: NSSize(width: 1502, height: 1201))
         defer { fixture.close() }
         try fixture.capture("coordinated-before")
         let rowSplit = try XCTUnwrap(fixture.splits.first { $0.isVertical })
         try drag(rowSplit, fixture: fixture, deltas: [-50, -100, -150])
         check(fixture.sizes(vertical: true), [350, 575, 575, 350, 575, 575])
-        fixture.splits[0].setPosition(400, ofDividerAt: 0)
-        check(fixture.sizes(vertical: false), [400, 400, 400, 600, 600, 600])
+        fixture.splits[0].setPosition(500, ofDividerAt: 0)
+        check(fixture.sizes(vertical: false), [500, 500, 500, 700, 700, 700])
         check(fixture.sizes(vertical: true), [350, 575, 575, 350, 575, 575])
         try fixture.capture("coordinated-after")
         fixture.columns[0].setConversationFraction(0.3)
@@ -146,7 +147,7 @@ final class CoordinatedPaneResizeTests: XCTestCase {
         check(fixture.sizes(vertical: true), [350, 575, 575, 350, 575, 575])
         fixture.controller.balance()
         check(fixture.sizes(vertical: true), Array(repeating: 500, count: 6))
-        check(fixture.sizes(vertical: false), Array(repeating: 500, count: 6))
+        check(fixture.sizes(vertical: false), Array(repeating: 600, count: 6))
     }
 
     @MainActor

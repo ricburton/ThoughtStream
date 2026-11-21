@@ -4,11 +4,24 @@ enum SidebarMetrics {
     static var rowHeight: CGFloat { InterfaceStyle.isBreathe ? Breathe.sidebarRowHeight : 30 }
 }
 
+/// Breathe separates the sidebar with space while keeping the divider draggable.
+@MainActor
+final class WorkspaceSplitView: NSSplitView {
+    override func drawDivider(in rect: NSRect) {
+        guard InterfaceStyle.isBreathe else { super.drawDivider(in: rect); return }
+        FeedPalette.backdrop.setFill()
+        rect.fill()
+    }
+}
+
 @MainActor
 final class SidebarSplitView: NSSplitView, NSSplitViewDelegate {
     var chatFraction: CGFloat = 2.0 / 3.0
     var onResize: (() -> Void)?
     private var arranging = false
+    private var hoverArea: NSTrackingArea?
+    private var hovering = false { didSet { needsDisplay = true } }
+    private var dragging = false { didSet { needsDisplay = true } }
 
     init() {
         super.init(frame: .zero)
@@ -16,14 +29,55 @@ final class SidebarSplitView: NSSplitView, NSSplitViewDelegate {
         dividerStyle = .thin
         delegate = self
         setAccessibilityLabel("Chats and projects")
+        setAccessibilityHelp("Drag the Projects tab up or down to resize the projects list.")
     }
     required init?(coder: NSCoder) { fatalError("Not implemented") }
-    override var dividerThickness: CGFloat { 8 }
+    override var dividerThickness: CGFloat { 36 }
+
+    private var dividerRect: NSRect {
+        guard subviews.count == 2 else { return .zero }
+        return NSRect(x: bounds.minX, y: min(subviews[0].frame.maxY, subviews[1].frame.maxY),
+                      width: bounds.width, height: dividerThickness)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: dividerRect, options: [.mouseEnteredAndExited, .activeInKeyWindow], owner: self)
+        addTrackingArea(area); hoverArea = area
+        hovering = window.map { dividerRect.contains(convert($0.mouseLocationOutsideOfEventStream, from: nil)) } ?? false
+    }
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+    override func mouseDown(with event: NSEvent) {
+        dragging = dividerRect.contains(convert(event.locationInWindow, from: nil))
+        defer { dragging = false; updateTrackingAreas() }
+        super.mouseDown(with: event)
+    }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance(); needsDisplay = true
+    }
 
     override func drawDivider(in rect: NSRect) {
-        NSColor.separatorColor.setFill()
-        NSBezierPath(roundedRect: NSRect(x: rect.midX - 18, y: rect.midY - 1,
-                                       width: 36, height: 2), xRadius: 1, yRadius: 1).fill()
+        let label = NSAttributedString(string: "Projects", attributes: [
+            .font: Typography.interfaceEmphasis, .foregroundColor: FeedPalette.text
+        ])
+        let tab = NSRect(x: rect.minX + 8, y: rect.minY,
+                         width: min(ceil(label.size().width) + 54, max(0, rect.width - 16)), height: rect.height)
+        ChatChrome.drawSelectedTab(in: tab, flipped: isFlipped)
+        if hovering || dragging {
+            let radius = InterfaceStyle.isBreathe ? Breathe.tabRadius : ChatChrome.tabRadius
+            FeedPalette.text.withAlphaComponent(dragging ? 0.09 : 0.045).setFill()
+            NSBezierPath(roundedRect: tab.insetBy(dx: 0.5, dy: InterfaceStyle.isBreathe ? 4 : 2),
+                         xRadius: radius, yRadius: radius).fill()
+        }
+        label.draw(at: NSPoint(x: tab.minX + 12, y: tab.midY - label.size().height / 2))
+        // Keep a visible resize cue even when the pointer is elsewhere.
+        (hovering || dragging ? FeedPalette.text : FeedPalette.muted).setFill()
+        for offset: CGFloat in [-2, 2] {
+            NSBezierPath(roundedRect: NSRect(x: tab.maxX - 26, y: tab.midY + offset - 0.5,
+                                           width: 14, height: 1), xRadius: 0.5, yRadius: 0.5).fill()
+        }
     }
 
     override func resizeSubviews(withOldSize oldSize: NSSize) {
@@ -33,6 +87,7 @@ final class SidebarSplitView: NSSplitView, NSSplitViewDelegate {
         let available = max(0, bounds.height - dividerThickness)
         setPosition(min(max(available * chatFraction, 100), max(100, available - 80)), ofDividerAt: 0)
         arranging = false
+        updateTrackingAreas()
     }
 
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat { 100 }
@@ -41,6 +96,7 @@ final class SidebarSplitView: NSSplitView, NSSplitViewDelegate {
     }
     func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool { false }
     func splitViewDidResizeSubviews(_ notification: Notification) {
+        updateTrackingAreas()
         guard !arranging, let chats = subviews.first, bounds.height > dividerThickness else { return }
         chatFraction = chats.frame.height / (bounds.height - dividerThickness)
         onResize?()

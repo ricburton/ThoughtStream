@@ -121,7 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             entry("Previous Chat or Pane", #selector(WorkspaceWindow.selectPreviousTab(_:)), "[", [.command, .shift]),
             entry("Next Chat or Pane", #selector(WorkspaceWindow.selectNextTab(_:)), "]", [.command, .shift]),
             separator,
-            entry("Split", #selector(WorkspaceWindow.splitStream(_:)), "p"),
+            entry("Add Pane", #selector(WorkspaceWindow.splitStream(_:)), "p"),
             entry("Stack", #selector(WorkspaceWindow.stackStream(_:)), "\\", [.command, .shift]),
             entry("Focus Previous Pane", #selector(WorkspaceWindow.focusPreviousPane(_:)), "[", [.command, .option]),
             entry("Focus Next Pane", #selector(WorkspaceWindow.focusNextPane(_:)), "]", [.command, .option]),

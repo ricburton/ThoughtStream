@@ -29,8 +29,9 @@ final class SendFlowTests: XCTestCase {
         column.view.layoutSubtreeIfNeeded()
         let panel = column.conversation
         let storage = try XCTUnwrap(panel.transcript.textStorage)
-        let prefix = try XCTUnwrap(panel.transcript.string.range(of: "You\n", options: .backwards))
-        let prefixLength = panel.transcript.string[..<prefix.lowerBound].utf16.count
+        // The message header differs by style; protect the preceding history itself.
+        let prefix = try XCTUnwrap(panel.transcript.string.range(of: history.last!.text.trimmingCharacters(in: .whitespacesAndNewlines), options: .backwards))
+        let prefixLength = panel.transcript.string[..<prefix.upperBound].utf16.count
         let edits = TranscriptEdits(); storage.delegate = edits
         panel.scroll.onScrollUp?()
         panel.scroll.contentView.scroll(to: NSPoint(x: 0, y: 100))

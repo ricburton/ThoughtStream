@@ -55,7 +55,7 @@ struct LocalModel: Equatable, Sendable {
 
     /// Stored as the chat's model, so a chat stays with one runtime's copy.
     var identifier: String { runtime.key + "|" + name }
-    var displayName: String { name + " · " + runtime.name }
+    var displayName: String { Self.shortName(name) + " · " + runtime.name }
 
     var record: [String: Any] {
         var record: [String: Any] = ["model": identifier, "displayName": displayName, "localModel": name, "runtime": runtime.name]
@@ -69,7 +69,10 @@ struct LocalModel: Equatable, Sendable {
         return runtime.isEmpty || model.isEmpty ? nil : (runtime, model)
     }
     /// "llama3.2:latest" from "ollama|llama3.2:latest".
-    static func shortName(_ identifier: String) -> String { split(identifier)?.model ?? identifier }
+    static func shortName(_ identifier: String) -> String {
+        let name = split(identifier)?.model ?? identifier
+        return name == InklingLocalModel.name ? InklingLocalModel.displayName : name
+    }
 }
 
 struct LocalRuntimeStatus: Equatable, Sendable {
@@ -189,6 +192,8 @@ enum LocalRuntimeLauncher {
             paths.first { FileManager.default.isExecutableFile(atPath: $0) }.map { URL(fileURLWithPath: $0) }
         }
         switch runtime.key {
+        case "llamacpp":
+            return InklingLocalModel.command()
         case "ollama":
             return first(["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"]).map { ($0, ["serve"]) }
         case "lmstudio":
@@ -203,7 +208,7 @@ enum LocalRuntimeLauncher {
     static func canStart(_ runtime: LocalRuntime) -> Bool {
         switch runtime.key {
         case "ollama": return isInstalled(runtime)
-        case "lmstudio": return commandLine(runtime) != nil
+        case "lmstudio", "llamacpp": return commandLine(runtime) != nil
         default: return false
         }
     }
@@ -225,7 +230,9 @@ enum LocalRuntimeLauncher {
             guard (try? task.run()) != nil else { return false }
         }
         let session = session ?? LocalModelFinder.makeSession()
-        let deadline = Date().addingTimeInterval(wait)
+        // Inkling's weights and vision encoder can take longer than a small
+        // runtime's HTTP listener to become ready on the first local chat.
+        let deadline = Date().addingTimeInterval(runtime.key == "llamacpp" ? max(wait, 120) : wait)
         while Date() < deadline {
             if await LocalModelFinder.models(of: runtime, session: session) != nil { return true }
             do { try await Task.sleep(nanoseconds: 500_000_000) } catch { return false }

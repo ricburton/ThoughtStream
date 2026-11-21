@@ -28,9 +28,9 @@ final class ChatWorkspaceWindow: NSWindow {
 
 /// Shared alignment for the sections inside a chat pane.
 enum PaneSpacing {
-    static let textInset: CGFloat = 12
-    static let gap: CGFloat = 4
-    static let composerInset: CGFloat = 12
+    static let textInset: CGFloat = 16
+    static let gap: CGFloat = 8
+    static let composerInset: CGFloat = 16
     static let controlHeight: CGFloat = 28
 }
 
@@ -52,7 +52,7 @@ class WorkspaceSurface: NSView {
 /// Clips the entire tab/feed/composer group into one contained pane.
 @MainActor
 final class PaneSurface: WorkspaceSurface {
-    static let inset: CGFloat = 8
+    static let inset: CGFloat = 12
     static let radius: CGFloat = 16
 
     override init(fill: NSColor = FeedPalette.canvas) {
@@ -87,11 +87,14 @@ enum ChatChrome {
     static let tabRadius: CGFloat = 12
 
     static func drawSelectedTab(in bounds: NSRect, flipped: Bool) {
-        let rect = bounds.insetBy(dx: 0.5, dy: 2)
+        let breathe = InterfaceStyle.isBreathe
+        let rect = bounds.insetBy(dx: 0.5, dy: breathe ? 4 : 2)
         guard rect.width > 0, rect.height > 0 else { return }
-        let shape = NSBezierPath(roundedRect: rect, xRadius: tabRadius, yRadius: tabRadius)
-        FeedPalette.text.withAlphaComponent(0.07).setFill()
+        let radius = breathe ? Breathe.tabRadius : tabRadius
+        let shape = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+        FeedPalette.text.withAlphaComponent(breathe ? 0.075 : 0.07).setFill()
         shape.fill()
+        guard !breathe || NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast else { return }
         FeedPalette.text.withAlphaComponent(NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? 0.5 : 0.1).setStroke()
         shape.lineWidth = 1
         shape.stroke()

@@ -23,13 +23,15 @@ final class ModelCatalog {
         let fallback: [[String: Any]]
         switch provider {
         case .claude: fallback = InferenceSettings.claudeModels.map { ["model": $0.id, "displayName": $0.name] }
+        case .gemini: fallback = Self.geminiRecords
         case .codex: fallback = [["model": InferenceSettings.preferred.model, "displayName": InferenceSettings.preferred.displayName]]
         // Only what is actually on this Mac. An empty list is the truth.
         case .local: fallback = []
         }
         // Keep the new release available with an older CLI's cached list, too.
         let seed: [[String: Any]] = provider == .claude
-            ? [["model": InferenceSettings.claudePreferredModel, "displayName": "Fable 5.2"]] : []
+            ? [["model": InferenceSettings.claudePreferredModel, "displayName": "Fable 5.2"]]
+            : provider == .gemini ? Self.geminiRecords : []
         var seen = Set<String>()
         return ((available.isEmpty ? fallback : available) + seed + (custom[provider] ?? [])).filter {
             guard let id = Self.identifier($0), seen.insert(id).inserted else { return false }
@@ -84,6 +86,9 @@ final class ModelCatalog {
               !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return id
     }
+    static var geminiRecords: [[String: Any]] {
+        InferenceSettings.geminiModels.map { ["model": $0.id, "displayName": $0.name] }
+    }
     private static func key(_ provider: AgentProvider, _ kind: String) -> String { "thoughtstream.models.\(provider.rawValue).\(kind)" }
     private static func decode(_ data: Data?) -> [[String: Any]] {
         guard let data else { return [] }
@@ -96,6 +101,9 @@ enum ProviderModelDiscovery {
     /// A fresh transport reads capabilities without attaching to a chat,
     /// submitting a prompt, or changing the running conversation's model.
     static func models(for provider: AgentProvider, executable: URL) async throws -> [[String: Any]] {
+        // Gemini CLI has no account-scoped model-list endpoint. Keep this
+        // release catalog and custom IDs available without starting a chat.
+        if provider == .gemini { return ModelCatalog.geminiRecords }
         if provider == .local {
             await LocalModelRegistry.shared.refresh()
             return LocalModelRegistry.shared.records

@@ -1,11 +1,12 @@
 import Foundation
 
 enum AgentProvider: String, CaseIterable, Codable {
-    case codex, claude, local
+    case codex, claude, gemini, local
     var label: String {
         switch self {
         case .codex: return "Codex"
         case .claude: return "Claude Code"
+        case .gemini: return "Gemini"
         case .local: return "Local Model"
         }
     }
@@ -19,6 +20,7 @@ enum AgentProvider: String, CaseIterable, Codable {
         if AccessMode.selected == .fullAccess { return "Full access · no approvals" }
         switch self {
         case .claude: return "Claude permissions · ask before actions"
+        case .gemini: return "Gemini · actions requiring approval are blocked"
         case .local: return "Local tools · ask before actions"
         case .codex: return AccessMode.selected.label
         }
