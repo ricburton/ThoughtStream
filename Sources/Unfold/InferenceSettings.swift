@@ -5,7 +5,9 @@ struct InferenceSettings: Codable, Equatable {
     var effort: String
     var tier: String
 
-    static let preferred = InferenceSettings(model: "gpt-6.1-sol", effort: "high", tier: "default")
+    // Verified against the installed Codex model/list on 2026-11-23.
+    // GPT-6.2 Astra is the public flagship but is not exposed by this runtime yet.
+    static let preferred = InferenceSettings(model: "gpt-6-astra", effort: "high", tier: "default")
     static let tiers = ["default", "fast", "ultrafast"]
     // https://aistudio.google.com/docs/models — verified 2026-11-21.
     static let geminiPreferredModel = "gemini-4-carbon"
@@ -89,10 +91,20 @@ struct InferenceSettings: Codable, Equatable {
                                      effort: defaults.string(forKey: "thoughtstream.claude.effort") ?? "high",
                                      tier: tier == "fast" ? "fast" : "default")
         }
-        return InferenceSettings(
+        let saved = InferenceSettings(
             model: defaults.string(forKey: "unfold.inference.model") ?? preferred.model,
             effort: defaults.string(forKey: "unfold.inference.effort") ?? preferred.effort,
             tier: defaults.string(forKey: "unfold.inference.tier") ?? preferred.tier)
+        // Move the previous new-chat default to the capability-first default.
+        // Per-conversation settings are stored separately and remain unchanged.
+        if saved == InferenceSettings(model: "gpt-6.1-sol", effort: "high", tier: "default"),
+           !defaults.bool(forKey: "thoughtstream.codex.capabilityDefaultMigrated") {
+            preferred.save(to: defaults)
+            defaults.set(true, forKey: "thoughtstream.codex.capabilityDefaultMigrated")
+            return preferred
+        }
+        defaults.set(true, forKey: "thoughtstream.codex.capabilityDefaultMigrated")
+        return saved
     }
     /// "sonnet" was the implicit default before the full catalog; it moves once to the most capable model.
     static func claudeModel(saved: String?, migrated: Bool) -> String {
@@ -121,6 +133,7 @@ struct InferenceSettings: Codable, Equatable {
     }
     var displayName: String {
         if let name = Self.geminiModels.first(where: { $0.id == model })?.name { return name }
+        if model == "gpt-6-astra" { return "GPT-6 Astra" }
         if model == "gpt-6.1-sol" { return "GPT-6.1 Sol" }
         if LocalModel.split(model) != nil { return LocalModel.shortName(model) }
         return Self.claudeModels.first { $0.id == model }?.name ?? model

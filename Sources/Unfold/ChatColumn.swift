@@ -123,6 +123,8 @@ final class ChatTabButton: NSButton {
     var dragPayload: ChatTabDrag?
     var onDragEnded: (() -> Void)?
     var isRunning = false
+    var modelBrand: ModelBrand = .openAI { didSet { needsDisplay = true } }
+    private static let thinkingImage = NSImage(systemSymbolName: "brain", accessibilityDescription: "Working")
 
     override func mouseDown(with event: NSEvent) {
         guard let payload = dragPayload, let window, let root = window.contentView else {
@@ -191,16 +193,10 @@ final class ChatTabButton: NSButton {
             FeedPalette.text.withAlphaComponent(isHighlighted ? 0.09 : 0.045).setFill()
             NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 4), xRadius: Breathe.tabRadius, yRadius: Breathe.tabRadius).fill()
         }
-        let style = NSMutableParagraphStyle(); style.lineBreakMode = .byTruncatingTail; style.alignment = .left
-        let label = NSAttributedString(string: title, attributes: [.font: selected ? Typography.interfaceEmphasis : Typography.interface, .foregroundColor: selected || isHovering ? FeedPalette.text : FeedPalette.muted, .paragraphStyle: style])
-        let leading: CGFloat = isRunning ? 28 : 16
+        let leading = ChatTabLayout.titleLeading(running: isRunning)
         let trailing: CGFloat = selected || isHovering ? 30 : 14
-        let labelHeight = ceil(label.size().height)
-        label.draw(in: NSRect(x: leading, y: (bounds.height - labelHeight) / 2, width: max(0, bounds.width - leading - trailing), height: labelHeight))
-        if isRunning {
-            FeedPalette.blue.setFill()
-            NSBezierPath(ovalIn: NSRect(x: 15, y: (bounds.height - 6) / 2, width: 6, height: 6)).fill()
-        }
+        drawTitle(leading: leading, trailing: trailing, color: selected || isHovering ? FeedPalette.text : FeedPalette.muted)
+        drawModelIdentity()
         if window?.firstResponder === self {
             NSColor.keyboardFocusIndicatorColor.setStroke()
             let focus = NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 5.5), xRadius: Breathe.tabRadius - 1.5, yRadius: Breathe.tabRadius - 1.5)
@@ -216,21 +212,38 @@ final class ChatTabButton: NSButton {
             FeedPalette.text.withAlphaComponent(isHighlighted ? 0.1 : 0.04).setFill()
             if isHighlighted || isHovering { shape.fill() }
         }
-        let style = NSMutableParagraphStyle(); style.lineBreakMode = .byTruncatingTail; style.alignment = .left
-        let label = NSAttributedString(string: title, attributes: [.font: state == .on ? Typography.interfaceEmphasis : Typography.interface, .foregroundColor: state == .on ? FeedPalette.text : FeedPalette.muted, .paragraphStyle: style])
-        let leading: CGFloat = isRunning ? 31 : 18
-        let labelHeight = ceil(label.size().height)
-        label.draw(in: NSRect(x: leading, y: (bounds.height - labelHeight) / 2, width: max(0, bounds.width - leading - 38), height: labelHeight))
-        if isRunning {
-            FeedPalette.blue.setFill()
-            NSBezierPath(ovalIn: NSRect(x: 17, y: (bounds.height - 6) / 2, width: 6, height: 6)).fill()
-        }
+        let leading = ChatTabLayout.titleLeading(running: isRunning)
+        drawTitle(leading: leading, trailing: 38, color: state == .on ? FeedPalette.text : FeedPalette.muted)
+        drawModelIdentity()
         if window?.firstResponder === self {
             NSColor.keyboardFocusIndicatorColor.setStroke()
             let focus = NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 3.5), xRadius: ChatChrome.tabRadius - 1.5, yRadius: ChatChrome.tabRadius - 1.5)
             focus.lineWidth = 2; focus.stroke()
         }
     }
+    private func drawModelIdentity() {
+        ModelBrand.draw(modelBrand.image, in: NSRect(x: 14, y: (bounds.height - 18) / 2, width: 18, height: 18),
+                        color: state == .on || isHovering ? FeedPalette.text : FeedPalette.muted)
+        if isRunning {
+            ModelBrand.draw(Self.thinkingImage, in: NSRect(x: 38, y: (bounds.height - 12) / 2, width: 12, height: 12),
+                            color: FeedPalette.blue)
+        }
+    }
+    private func drawTitle(leading: CGFloat, trailing: CGFloat, color: NSColor) {
+        let font = state == .on ? Typography.interfaceEmphasis : Typography.interface
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byWordWrapping; style.alignment = .left
+        let label = NSAttributedString(string: title, attributes: [.font: font, .foregroundColor: color, .paragraphStyle: style])
+        let width = max(0, bounds.width - leading - trailing)
+        guard width > 0 else { return }
+        let lineHeight = NSLayoutManager().defaultLineHeight(for: font)
+        let maximumHeight = min(ceil(lineHeight * 2), max(0, bounds.height - 8))
+        let options: NSString.DrawingOptions = [.usesLineFragmentOrigin, .truncatesLastVisibleLine]
+        let measuredHeight = ceil(label.boundingRect(with: NSSize(width: width, height: .greatestFiniteMagnitude), options: .usesLineFragmentOrigin).height)
+        let height = min(maximumHeight, measuredHeight)
+        label.draw(with: NSRect(x: leading, y: (bounds.height - height) / 2, width: width, height: height), options: options)
+    }
+
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance(); needsDisplay = true
     }
@@ -243,7 +256,7 @@ final class ChatTabItem: NSView {
     private var hoverArea: NSTrackingArea?
     private let onSelect: () -> Void
     private let onClose: () -> Void
-    init(title: String, selected: Bool, isRunning: Bool = false, dragPayload: ChatTabDrag?, onDragEnded: @escaping () -> Void, onSelect: @escaping () -> Void, onClose: @escaping () -> Void) {
+    init(title: String, selected: Bool, provider: AgentProvider, modelName: String, isRunning: Bool = false, dragPayload: ChatTabDrag?, onDragEnded: @escaping () -> Void, onSelect: @escaping () -> Void, onClose: @escaping () -> Void) {
         self.onSelect = onSelect; self.onClose = onClose
         tab = ChatTabButton(title: title, target: nil, action: nil)
         super.init(frame: .zero)
@@ -251,8 +264,11 @@ final class ChatTabItem: NSView {
         tab.target = self; tab.action = #selector(selectTab); tab.isBordered = false
         tab.setButtonType(.momentaryPushIn); tab.state = selected ? .on : .off
         tab.isRunning = isRunning
-        tab.toolTip = title + (dragPayload == nil ? "" : " — drag to a pane edge to split"); tab.setAccessibilityLabel(title + (selected ? ", selected" : ""))
-        if isRunning { tab.setAccessibilityLabel(title + (selected ? ", selected, running" : ", running")) }
+        tab.modelBrand = ModelBrand(provider: provider)
+        let identity = "\(tab.modelBrand.name) · \(modelName)"
+        tab.toolTip = "\(title)\n\(identity)" + (isRunning ? "\nWorking" : "")
+            + (dragPayload == nil ? "" : "\nDrag to a pane edge to split")
+        tab.setAccessibilityLabel("\(title), \(identity)" + (selected ? ", selected" : "") + (isRunning ? ", running" : ""))
         closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")?.withSymbolConfiguration(.init(pointSize: 9, weight: .medium))
         closeButton.isBordered = false; closeButton.contentTintColor = .secondaryLabelColor
         closeButton.target = self; closeButton.action = #selector(closeTab)
@@ -823,7 +839,8 @@ final class ChatColumn: NSViewController, NSTextViewDelegate {
         var selectedItem: ChatTabItem?
         for (index, chat) in chats {
             let title = ChatTabTitle.display(chat.title)
-            let item = ChatTabItem(title: title, selected: chat === session, isRunning: chat.turn != nil,
+            let item = ChatTabItem(title: title, selected: chat === session, provider: chat.provider,
+                                   modelName: chat.inferenceSettings.displayName, isRunning: chat.turn != nil,
                                    dragPayload: tabsOnly ? nil : ChatTabDrag(sessionID: chat.id, columnID: columnID),
                                    onDragEnded: { [weak self] in self?.onTabDragEnded?() },
                                    onSelect: { [weak self] in self?.onSelectChat?(index) },

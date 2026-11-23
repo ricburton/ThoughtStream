@@ -182,8 +182,7 @@ final class BreatheStyleTests: XCTestCase {
         }
         XCTAssertEqual(open[0].tabIDs, chats.map(\.id))
 
-        // Add Pane rides in the title bar, so the panes start right beneath it
-        // and return below the header strip in the standard look.
+        // The header keeps Settings immediately before Add Pane in every style.
         let content = try XCTUnwrap(workspace.window?.contentView)
         func addPane() throws -> NSButton {
             let frame = try XCTUnwrap(content.superview)
@@ -192,7 +191,7 @@ final class BreatheStyleTests: XCTestCase {
         func paneTop() -> CGFloat { content.bounds.maxY - open[0].view.convert(open[0].view.bounds, to: content).maxY }
         let frame = try XCTUnwrap(content.superview)
         let settings = try XCTUnwrap(button("Settings", in: frame))
-        XCTAssertFalse(settings.isDescendant(of: content))
+        XCTAssertTrue(settings.isDescendant(of: content))
         let settingsFrame = settings.convert(settings.bounds, to: frame)
         let addFrame = try addPane().convert(addPane().bounds, to: frame)
         XCTAssertLessThan(settingsFrame.maxX, addFrame.minX)
@@ -203,8 +202,8 @@ final class BreatheStyleTests: XCTestCase {
         XCTAssertEqual(settings.imagePosition, .imageLeading)
         XCTAssertNotNil(settings.image)
         XCTAssertEqual(try addPane().action, #selector(WorkspaceWindow.splitStream(_:)))
-        XCTAssertFalse(try addPane().isDescendant(of: content))
-        XCTAssertEqual(workspace.window?.titlebarAccessoryViewControllers.count, 1)
+        XCTAssertTrue(try addPane().isDescendant(of: content))
+        XCTAssertEqual(workspace.window?.titlebarAccessoryViewControllers.count, 0)
         let breatheTop = paneTop()
         InterfaceStyle.current = .standard
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))

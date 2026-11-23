@@ -53,7 +53,6 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private let addPaneButton = AddPaneButton(title: "Add Pane", target: nil, action: nil)
     private var headerRow: NSStackView?
     private var headerHeight: NSLayoutConstraint?
-    private var titlebarControls: NSTitlebarAccessoryViewController?
     private let bodySurface = WorkspaceSurface()
     private let claudeConnectButton = NSButton(title: "Connect Claude", target: nil, action: nil)
     private let claudeAccountStatus = NSTextField(wrappingLabelWithString: "Use your Claude Code sign-in on this Mac.")
@@ -209,35 +208,37 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         projectHistoryTable.backgroundColor = .clear; projectHistoryTable.intercellSpacing = .zero
         projectHistoryTable.focusRingType = .default
         projectHistoryTable.delegate = self; projectHistoryTable.dataSource = self; projectHistoryTable.target = self; projectHistoryTable.action = #selector(sidebarSelected)
-        projectHistoryTable.setAccessibilityLabel("Projects")
+        projectHistoryTable.setAccessibilityLabel("Folders")
         tableScroll.documentView = projectHistoryTable
         let inferenceControls = makeInferenceControls()
-        let open = SidebarActionButton(title: "Open project…", target: self, action: #selector(openProject(_:)))
+        let open = SidebarActionButton(title: "Open Folder…", target: self, action: #selector(openProject(_:)))
         open.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil); open.imagePosition = .imageLeading
-        // The split divider doubles as the Projects heading and resize tab.
-        for scroll in [liveScroll, tableScroll] {
-            let section = NSView()
-            scroll.translatesAutoresizingMaskIntoConstraints = false
-            section.addSubview(scroll)
-            scroll.topAnchor.constraint(equalTo: section.topAnchor).isActive = true
-            NSLayoutConstraint.activate([
-                scroll.leadingAnchor.constraint(equalTo: section.leadingAnchor),
-                scroll.trailingAnchor.constraint(equalTo: section.trailingAnchor),
-                scroll.bottomAnchor.constraint(equalTo: section.bottomAnchor)
-            ])
-            sidebarSplit.addArrangedSubview(section)
-        }
-        let railStack = NSStackView(views: [sidebarHeader, localSearch.field, open, sidebarSplit, inferenceControls])
+        let foldersTitle = NSTextField(labelWithString: "Folders")
+        foldersTitle.font = Typography.section
+        foldersTitle.textColor = FeedPalette.muted
+        let folderHeader = NSStackView(views: [foldersTitle, NSView()])
+        folderHeader.orientation = .horizontal
+        folderHeader.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 0)
+        let folderSection = NSStackView(views: [folderHeader, open, tableScroll])
+        folderSection.orientation = .vertical; folderSection.alignment = .leading; folderSection.spacing = 8
+        sidebarSplit.addArrangedSubview(liveScroll)
+        sidebarSplit.addArrangedSubview(folderSection)
+        NSLayoutConstraint.activate([
+            folderHeader.widthAnchor.constraint(equalTo: folderSection.widthAnchor),
+            folderHeader.heightAnchor.constraint(equalToConstant: 28),
+            open.widthAnchor.constraint(equalTo: folderSection.widthAnchor),
+            tableScroll.widthAnchor.constraint(equalTo: folderSection.widthAnchor),
+            tableScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 28)
+        ])
+        let railStack = NSStackView(views: [sidebarHeader, localSearch.field, sidebarSplit, inferenceControls])
         railStack.orientation = .vertical; railStack.alignment = .leading; railStack.spacing = 4
         railStack.setCustomSpacing(10, after: sidebarHeader)
         railStack.setCustomSpacing(12, after: localSearch.field)
-        railStack.setCustomSpacing(12, after: open)
         railStack.setCustomSpacing(12, after: sidebarSplit)
         railStack.translatesAutoresizingMaskIntoConstraints = false; rail.view.addSubview(railStack)
         NSLayoutConstraint.activate([
             sidebarSplit.widthAnchor.constraint(equalTo: railStack.widthAnchor),
             sidebarSplit.heightAnchor.constraint(greaterThanOrEqualToConstant: 216),
-            open.widthAnchor.constraint(equalTo: railStack.widthAnchor),
             open.heightAnchor.constraint(equalToConstant: 28),
             railStack.leadingAnchor.constraint(equalTo: rail.view.leadingAnchor, constant: 12),
             railStack.trailingAnchor.constraint(equalTo: rail.view.trailingAnchor, constant: -12),
@@ -324,42 +325,13 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         outer.addSplitViewItem(NSSplitViewItem(viewController: body)); window?.contentViewController = outer
         applyHeaderStyle()
     }
-    /// Keep the pane action at the trailing edge; Breathe uses the title bar.
+    /// Keep Settings immediately before Add Pane at the top trailing edge in every style.
     private func applyHeaderStyle() {
-        let quiet = InterfaceStyle.isBreathe
         settingsButton.contentTintColor = FeedPalette.text
         addPaneButton.needsDisplay = true
-        // The body joins the backdrop the pane cards float on.
-        bodySurface.fill = quiet ? FeedPalette.backdrop : FeedPalette.canvas
-        guard let window, let header = headerRow else { return }
-        if quiet, titlebarControls == nil {
-            for view in [settingsButton, addPaneButton] { header.removeArrangedSubview(view); view.removeFromSuperview() }
-            let controls = NSStackView(views: [settingsButton, addPaneButton])
-            controls.orientation = .horizontal; controls.alignment = .centerY; controls.spacing = 8
-            controls.translatesAutoresizingMaskIntoConstraints = false
-            let holder = NSView(frame: NSRect(x: 0, y: 0, width: 290, height: 40))
-            holder.addSubview(controls)
-            NSLayoutConstraint.activate([
-                controls.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: -24),
-                controls.centerYAnchor.constraint(equalTo: holder.centerYAnchor)
-            ])
-            let accessory = NSTitlebarAccessoryViewController()
-            accessory.view = holder
-            // A bottom accessory owns its height; side accessories are clamped to the native title row.
-            accessory.layoutAttribute = .bottom
-            accessory.fullScreenMinHeight = 40
-            window.addTitlebarAccessoryViewController(accessory)
-            titlebarControls = accessory
-            header.isHidden = true; headerHeight?.constant = 0
-        } else if !quiet, let accessory = titlebarControls {
-            if let index = window.titlebarAccessoryViewControllers.firstIndex(of: accessory) {
-                window.removeTitlebarAccessoryViewController(at: index)
-            }
-            titlebarControls = nil
-            for view in [settingsButton, addPaneButton] { view.removeFromSuperview() }
-            header.addArrangedSubview(settingsButton); header.addArrangedSubview(addPaneButton)
-            header.isHidden = false; headerHeight?.constant = 40
-        }
+        bodySurface.fill = InterfaceStyle.isBreathe ? FeedPalette.backdrop : FeedPalette.canvas
+        headerRow?.isHidden = false
+        headerHeight?.constant = 40
     }
     private func openSearchResult(_ result: LocalHistorySearch.Result) {
         searchOpenTask?.cancel()
@@ -1326,6 +1298,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         inferenceSession?.setInferenceSettings(settings)
         settings.save(provider: provider)
         refreshProviderControls()
+        refreshNavigation()
     }
     @objc private func modelSelected() {
         guard let selected = model.selectedItem?.representedObject as? String else { refreshProviderControls(); return }
@@ -1378,6 +1351,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         let settings = chosenSettings
         inferenceSession?.setInferenceSettings(settings)
         settings.save(provider: currentProvider)
+        refreshNavigation()
     }
     var chosenSettings: InferenceSettings {
         let saved = currentInferenceSettings

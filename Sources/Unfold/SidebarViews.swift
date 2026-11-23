@@ -28,11 +28,11 @@ final class SidebarSplitView: NSSplitView, NSSplitViewDelegate {
         isVertical = false
         dividerStyle = .thin
         delegate = self
-        setAccessibilityLabel("Chats and projects")
-        setAccessibilityHelp("Drag the Projects tab up or down to resize the projects list.")
+        setAccessibilityLabel("Chats and folders")
+        setAccessibilityHelp("Drag the grip above Folders up or down to resize the folders list.")
     }
     required init?(coder: NSCoder) { fatalError("Not implemented") }
-    override var dividerThickness: CGFloat { 36 }
+    override var dividerThickness: CGFloat { 20 }
 
     private var dividerRect: NSRect {
         guard subviews.count == 2 else { return .zero }
@@ -59,24 +59,11 @@ final class SidebarSplitView: NSSplitView, NSSplitViewDelegate {
     }
 
     override func drawDivider(in rect: NSRect) {
-        let label = NSAttributedString(string: "Projects", attributes: [
-            .font: Typography.interfaceEmphasis, .foregroundColor: FeedPalette.text
-        ])
-        let tab = NSRect(x: rect.minX + 8, y: rect.minY,
-                         width: min(ceil(label.size().width) + 54, max(0, rect.width - 16)), height: rect.height)
-        ChatChrome.drawSelectedTab(in: tab, flipped: isFlipped)
-        if hovering || dragging {
-            let radius = InterfaceStyle.isBreathe ? Breathe.tabRadius : ChatChrome.tabRadius
-            FeedPalette.text.withAlphaComponent(dragging ? 0.09 : 0.045).setFill()
-            NSBezierPath(roundedRect: tab.insetBy(dx: 0.5, dy: InterfaceStyle.isBreathe ? 4 : 2),
-                         xRadius: radius, yRadius: radius).fill()
-        }
-        label.draw(at: NSPoint(x: tab.minX + 12, y: tab.midY - label.size().height / 2))
-        // Keep a visible resize cue even when the pointer is elsewhere.
+        // The resize grip sits above the independently left-aligned folder heading.
         (hovering || dragging ? FeedPalette.text : FeedPalette.muted).setFill()
         for offset: CGFloat in [-2, 2] {
-            NSBezierPath(roundedRect: NSRect(x: tab.maxX - 26, y: tab.midY + offset - 0.5,
-                                           width: 14, height: 1), xRadius: 0.5, yRadius: 0.5).fill()
+            NSBezierPath(roundedRect: NSRect(x: rect.midX - 14, y: rect.midY + offset - 0.5,
+                                           width: 28, height: 1), xRadius: 0.5, yRadius: 0.5).fill()
         }
     }
 
@@ -85,14 +72,14 @@ final class SidebarSplitView: NSSplitView, NSSplitViewDelegate {
         arranging = true
         super.resizeSubviews(withOldSize: oldSize)
         let available = max(0, bounds.height - dividerThickness)
-        setPosition(min(max(available * chatFraction, 100), max(100, available - 80)), ofDividerAt: 0)
+        setPosition(min(max(available * chatFraction, 100), max(100, available - 112)), ofDividerAt: 0)
         arranging = false
         updateTrackingAreas()
     }
 
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat { 100 }
     func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
-        max(100, bounds.height - dividerThickness - 80)
+        max(100, bounds.height - dividerThickness - 112)
     }
     func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool { false }
     func splitViewDidResizeSubviews(_ notification: Notification) {

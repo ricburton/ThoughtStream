@@ -11,3 +11,12 @@ and never run the one-shot installer as a KeepAlive launchd job.
 Other chats may be editing this checkout. Use `Scripts/Build-Isolated.sh` or a
 private source snapshot and build directory; preserve unrelated changes. Test
 fixtures may start isolated local Codex runtimes without opening the main app.
+
+The user wants models kept on the latest, most capable available releases.
+When maintaining model defaults or catalogs, check every supported provider's
+current official documentation and the installed runtime's model availability.
+Prefer capability over cost or speed unless the user explicitly chooses otherwise.
+Use the strongest compatible model actually available to the account; report
+newer flagships that the runtime does not yet expose rather than claiming access.
+Keep explicit conversation choices and historical test fixtures intact. This
+policy does not authorize app restarts or automatic model downloads.

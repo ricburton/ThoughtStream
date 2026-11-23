@@ -91,7 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
         let file = group("File", [
             entry("New Chat", #selector(WorkspaceWindow.newChat(_:)), "n"),
-            entry("Open Project…", #selector(WorkspaceWindow.openProject(_:)), "o"),
+            entry("Open Folder…", #selector(WorkspaceWindow.openProject(_:)), "o"),
             separator,
             entry("Close Tab", #selector(WorkspaceWindow.closeTab(_:)), "w"),
             entry("Reopen Closed Tab", #selector(WorkspaceWindow.reopenClosedTab(_:)), "t", [.command, .shift]),

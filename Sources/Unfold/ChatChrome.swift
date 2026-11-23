@@ -52,7 +52,7 @@ class WorkspaceSurface: NSView {
 /// Clips the entire tab/feed/composer group into one contained pane.
 @MainActor
 final class PaneSurface: WorkspaceSurface {
-    static let inset: CGFloat = 12
+    static let inset: CGFloat = 16
     static let radius: CGFloat = 16
 
     override init(fill: NSColor = FeedPalette.canvas) {

@@ -8,7 +8,7 @@ let package = Package(
     dependencies: [.package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1")],
     targets: [
         .target(name: "GitDiff", path: "Sources/GitDiff", exclude: ["UPSTREAM.md", "LICENSE"]),
-        .executableTarget(name: "ThoughtStream", dependencies: ["GitDiff", .product(name: "Sparkle", package: "Sparkle")], path: "Sources/Unfold", exclude: ["Renderer"], resources: [.copy("Tools"), .copy("ThirdPartyNotices")], linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]),
+        .executableTarget(name: "ThoughtStream", dependencies: ["GitDiff", .product(name: "Sparkle", package: "Sparkle")], path: "Sources/Unfold", exclude: ["Renderer"], resources: [.copy("Tools"), .copy("ThirdPartyNotices"), .copy("ModelBrandIcons")], linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]),
         .testTarget(name: "ThoughtStreamTests", dependencies: ["ThoughtStream"], path: "Tests/UnfoldTests")
     ]
 )

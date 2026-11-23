@@ -56,7 +56,7 @@ final class ConversationVisibilityTests: XCTestCase {
         }
         let content = try XCTUnwrap(window.contentView)
         let live = try XCTUnwrap(descendants(content).compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel() == "Live conversations" })
-        let projects = try XCTUnwrap(descendants(content).compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel() == "Projects" })
+        let projects = try XCTUnwrap(descendants(content).compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel() == "Folders" })
         let column = try XCTUnwrap(columns(try XCTUnwrap(window.contentViewController)).first)
         func titles() -> [String] {
             (0..<live.numberOfRows).compactMap { (workspace.tableView(live, viewFor: nil, row: $0) as? SidebarConversationCell)?.textField?.stringValue }

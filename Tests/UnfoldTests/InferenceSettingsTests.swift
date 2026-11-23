@@ -8,10 +8,20 @@ final class InferenceSettingsTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: name) }
         let settings = InferenceSettings.load(from: defaults)
         XCTAssertEqual(settings, .preferred)
-        XCTAssertEqual(settings.threadParameters["model"] as? String, "gpt-6.1-sol")
+        XCTAssertEqual(settings.threadParameters["model"] as? String, "gpt-6-astra")
         XCTAssertEqual(settings.threadParameters["serviceTier"] as? String, "default")
         XCTAssertEqual((settings.threadParameters["config"] as? [String: String])?["model_reasoning_effort"], "high")
-        XCTAssertEqual(settings.turnParameters as? [String: String], ["model": "gpt-6.1-sol", "effort": "high", "serviceTier": "default"])
+        XCTAssertEqual(settings.turnParameters as? [String: String], ["model": "gpt-6-astra", "effort": "high", "serviceTier": "default"])
+    }
+    func testPreviousDefaultUpgradesOnceAndLaterManualChoiceIsRemembered() throws {
+        let name = "UnfoldSettingsTest-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let oldDefault = InferenceSettings(model: "gpt-6.1-sol", effort: "high", tier: "default")
+        oldDefault.save(to: defaults)
+        XCTAssertEqual(InferenceSettings.load(from: defaults), .preferred)
+        oldDefault.save(to: defaults)
+        XCTAssertEqual(InferenceSettings.load(from: defaults), oldDefault)
     }
     func testManualSelectionIsRemembered() throws {
         let name = "UnfoldSettingsTest-\(UUID())"

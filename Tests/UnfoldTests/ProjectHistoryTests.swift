@@ -114,7 +114,7 @@ final class ProjectHistoryTests: XCTestCase {
         }
         func descend(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descend) }
         let controller = try XCTUnwrap(workspace.window?.contentViewController)
-        let sidebar = try XCTUnwrap(descend(controller.view).compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel() == "Projects" })
+        let sidebar = try XCTUnwrap(descend(controller.view).compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel() == "Folders" })
         var imported: [UUID] = []
         defer {
             workspace.stopAll(); workspace.window?.close()

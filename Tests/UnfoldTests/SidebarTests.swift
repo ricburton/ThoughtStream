@@ -22,7 +22,7 @@ final class SidebarTests: XCTestCase {
         func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
         let content = try XCTUnwrap(workspace.window?.contentView)
         let table = try XCTUnwrap(descendants(content).compactMap { $0 as? NSTableView }
-            .first { $0.accessibilityLabel() == "Projects" })
+            .first { $0.accessibilityLabel() == "Folders" })
         func names() -> [String] {
             (0..<table.numberOfRows).compactMap {
                 (workspace.tableView(table, viewFor: nil, row: $0) as? SidebarProjectCell)?.textField?.stringValue
@@ -61,7 +61,7 @@ final class SidebarTests: XCTestCase {
         func descend(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descend) }
         let tables = descend(content).compactMap { $0 as? NSTableView }
         let live = try XCTUnwrap(tables.first { $0.accessibilityLabel() == "Live conversations" })
-        let projects = try XCTUnwrap(tables.first { $0.accessibilityLabel() == "Projects" })
+        let projects = try XCTUnwrap(tables.first { $0.accessibilityLabel() == "Folders" })
         XCTAssertEqual(live.numberOfRows, 2)
         XCTAssertEqual(projects.numberOfRows, 2)
         let first = try XCTUnwrap(workspace.tableView(live, viewFor: nil, row: 0) as? SidebarConversationCell)
