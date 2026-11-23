@@ -317,8 +317,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             child.translatesAutoresizingMaskIntoConstraints = false; body.view.addSubview(child)
         }
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: body.view.safeAreaLayoutGuide.topAnchor, constant: 2),
-            header.leadingAnchor.constraint(equalTo: body.view.leadingAnchor, constant: 18), header.trailingAnchor.constraint(equalTo: body.view.trailingAnchor, constant: -18), headerHeight!,
+            header.topAnchor.constraint(equalTo: body.view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            header.leadingAnchor.constraint(equalTo: body.view.leadingAnchor, constant: 18), header.trailingAnchor.constraint(equalTo: body.view.trailingAnchor, constant: -24), headerHeight!,
             tabSplitHost.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 2), tabSplitHost.leadingAnchor.constraint(equalTo: body.view.leadingAnchor), tabSplitHost.trailingAnchor.constraint(equalTo: body.view.trailingAnchor), tabSplitHost.bottomAnchor.constraint(equalTo: body.view.bottomAnchor)
         ])
         outer.addSplitViewItem(NSSplitViewItem(viewController: body)); window?.contentViewController = outer
@@ -337,15 +337,17 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             let controls = NSStackView(views: [settingsButton, addPaneButton])
             controls.orientation = .horizontal; controls.alignment = .centerY; controls.spacing = 8
             controls.translatesAutoresizingMaskIntoConstraints = false
-            let holder = NSView(frame: NSRect(x: 0, y: 0, width: 278, height: 36))
+            let holder = NSView(frame: NSRect(x: 0, y: 0, width: 290, height: 40))
             holder.addSubview(controls)
             NSLayoutConstraint.activate([
-                controls.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: -12),
+                controls.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: -24),
                 controls.centerYAnchor.constraint(equalTo: holder.centerYAnchor)
             ])
             let accessory = NSTitlebarAccessoryViewController()
             accessory.view = holder
-            accessory.layoutAttribute = .trailing
+            // A bottom accessory owns its height; side accessories are clamped to the native title row.
+            accessory.layoutAttribute = .bottom
+            accessory.fullScreenMinHeight = 40
             window.addTitlebarAccessoryViewController(accessory)
             titlebarControls = accessory
             header.isHidden = true; headerHeight?.constant = 0
