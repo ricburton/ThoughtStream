@@ -18,6 +18,7 @@ struct NativeFeedRenderer {
     private(set) var blocks: [NativeFeedBlock] = []
     private var buffer = NSMutableAttributedString(string: "")
     private var tone = NativeTextTone.plain
+    private var contentOrigin = FeedContentOrigin.context
     private var jsonSource: String?
     private var font: NSFont { Typography.prose(ofSize: size) }
     private var mono: NSFont { .monospacedSystemFont(ofSize: max(8, size - (tone == .muted ? 4 : 2)), weight: .regular) }
@@ -27,15 +28,19 @@ struct NativeFeedRenderer {
     init(size: CGFloat, analyses: [String: PythonAnalysis]) { self.size = size; self.analyses = analyses }
 
     mutating func render(_ record: StreamRecord) -> [NativeFeedBlock] {
+        contentOrigin = FeedContentOrigin(record: record)
         renderContent(record)
         trimPresentation()
+        applyContentOrigin()
         return blocks
     }
 
     private mutating func renderContent(_ record: StreamRecord) {
         tone = record.kind == "Reasoning summary" ? .reasoning : record.kind == "You" ? .user : record.kind == "Error" ? .error : record.kind == "Session" ? .muted : .plain
+        if contentOrigin == .error { tone = .error }
         let time = Self.clock.string(from: record.time)
-        blocks.append(.header(record.queuedStatus != nil ? "Queued Chat" : record.kind == "Agent" ? "Assistant" : record.kind, time, ["Command", "Code", "File change"].contains(record.kind) ? .command : tone, size))
+        let heading = record.queuedStatus != nil ? "Queued Chat" : record.kind == "Agent" ? "Assistant" : record.kind == "File change" ? "Project changes" : record.kind == "Tool" ? contentOrigin.title : record.kind
+        blocks.append(.header(heading, time, contentOrigin == .error ? .error : ["Command", "Code", "File change"].contains(record.kind) ? .command : tone, size))
         if record.isFinalResponse == true {
             markdown(record.text); flush(); return
         }
@@ -107,6 +112,36 @@ struct NativeFeedRenderer {
             default: return block
             }
         }
+    }
+
+    private mutating func applyContentOrigin() {
+        func tagged(_ text: NSAttributedString) -> NSAttributedString {
+            let result = NSMutableAttributedString(attributedString: text)
+            result.addAttribute(.feedContentOrigin, value: contentOrigin.rawValue, range: NSRange(location: 0, length: result.length))
+            return result
+        }
+        var presented: [NativeFeedBlock] = []
+        let responseText = NSMutableAttributedString(string: "")
+        func flushResponse() {
+            guard responseText.length > 0 else { return }
+            presented.append(.code(tagged(responseText), source: responseText.string, label: "Text"))
+            responseText.setAttributedString(NSAttributedString(string: ""))
+        }
+        for block in blocks {
+            // Decoded tool prose gets the same expandable preview as JSON,
+            // retaining its readable formatting, links and the raw header copy.
+            if contentOrigin == .apiResponse, case .text(let text) = block {
+                if responseText.length > 0 { responseText.append(NSAttributedString(string: "\n\n")) }
+                responseText.append(text)
+                continue
+            }
+            flushResponse()
+            if case .code(let text, let source, let label) = block {
+                presented.append(.code(tagged(text), source: source, label: label))
+            } else { presented.append(block) }
+        }
+        flushResponse()
+        blocks = presented
     }
     private func paragraph(indent: CGFloat = 0, spacing: CGFloat = 0, code: Bool = false, font: NSFont? = nil) -> NSParagraphStyle {
         let lineHeight = (font?.pointSize ?? size) * (code ? 1.5 : 1.6)
@@ -191,30 +226,30 @@ struct NativeFeedRenderer {
         switch value {
         case .object(let fields):
             let flat = fields.count > 1 && fields.allSatisfy { $0.0.count <= 40 && ($0.1.scalar?.count ?? 999) <= 34 && !($0.1.string?.contains("\n") ?? false) }
-            if fields.isEmpty { text("{}", font: mono, color: .secondaryLabelColor) }
+            if fields.isEmpty { text("{}", font: mono, color: FeedPalette.muted) }
             else if flat {
-                text("{ ", font: mono, color: .secondaryLabelColor)
+                text("{ ", font: mono, color: FeedPalette.muted)
                 for (index, field) in fields.enumerated() {
                     text(NativeJSON.quoted(field.0) + ": ", font: mono, color: FeedPalette.jsonKey)
                     scalar(field.1)
-                    if index < fields.count - 1 { text(",  ", font: mono, color: .secondaryLabelColor) }
+                    if index < fields.count - 1 { text(",  ", font: mono, color: FeedPalette.muted) }
                 }
-                text(" }", font: mono, color: .secondaryLabelColor)
+                text(" }", font: mono, color: FeedPalette.muted)
             } else {
-                text("{", font: mono, color: .secondaryLabelColor); jsonCount(fields.count, noun: "fields"); text("\n", font: mono)
+                text("{", font: mono, color: FeedPalette.muted); jsonCount(fields.count, noun: "fields"); text("\n", font: mono)
                 for (index, field) in fields.enumerated() { jsonValue(field.1, depth: depth + 1, key: field.0, comma: index < fields.count - 1) }
-                text(indent + "}", font: mono, color: .secondaryLabelColor)
+                text(indent + "}", font: mono, color: FeedPalette.muted)
             }
         case .array(let items):
-            if items.isEmpty { text("[]", font: mono, color: .secondaryLabelColor) }
+            if items.isEmpty { text("[]", font: mono, color: FeedPalette.muted) }
             else {
-                text("[", font: mono, color: .secondaryLabelColor); jsonCount(items.count, noun: "items"); text("\n", font: mono)
+                text("[", font: mono, color: FeedPalette.muted); jsonCount(items.count, noun: "items"); text("\n", font: mono)
                 for (index, item) in items.enumerated() { jsonValue(item, depth: depth + 1, comma: index < items.count - 1) }
-                text(indent + "]", font: mono, color: .secondaryLabelColor)
+                text(indent + "]", font: mono, color: FeedPalette.muted)
             }
         default: scalar(value)
         }
-        text(comma ? ",\n" : "\n", font: mono, color: .secondaryLabelColor)
+        text(comma ? ",\n" : "\n", font: mono, color: FeedPalette.muted)
     }
     private mutating func scalar(_ value: NativeJSON) {
         let color: NSColor
@@ -280,7 +315,7 @@ struct NativeFeedRenderer {
                 inline(columns.joined(separator: "\t"), font: mono); text("\n", font: mono)
             } else if let match = firstMatch(Self.listPattern, line) {
                 text("  •  "); inline((line as NSString).substring(with: match.range(at: 1))); text("\n")
-            } else if trimmed.hasPrefix(">") { text("│  ", color: .secondaryLabelColor); inline(String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)); text("\n") }
+            } else if trimmed.hasPrefix(">") { text("│  ", color: FeedPalette.muted); inline(String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)); text("\n") }
             else { inline(line); text("\n") }
             i += 1
         }
@@ -328,11 +363,11 @@ struct NativeFeedRenderer {
         }
         if let analysis {
             for diagnostic in analysis.diagnostics {
-                result.append(NSAttributedString(string: "\n\(diagnostic.code)  \(diagnostic.line):\(diagnostic.column)  \(diagnostic.message)", attributes: [.font: NSFont.systemFont(ofSize: max(8, size - 3)), .foregroundColor: NSColor.systemOrange]))
+                result.append(NSAttributedString(string: "\n\(diagnostic.code)  \(diagnostic.line):\(diagnostic.column)  \(diagnostic.message)", attributes: [.font: Typography.prose(ofSize: max(8, size - 3)), .foregroundColor: NSColor.systemOrange]))
             }
         }
         if let analysis, let message = analysis.message {
-            result.append(NSAttributedString(string: "\n\(message)", attributes: [.font: NSFont.systemFont(ofSize: max(8, size - 3)), .foregroundColor: FeedPalette.muted]))
+            result.append(NSAttributedString(string: "\n\(message)", attributes: [.font: Typography.prose(ofSize: max(8, size - 3)), .foregroundColor: FeedPalette.muted]))
         }
         let name = normalized == "python" ? "Python" : normalized == "javascript" ? "JavaScript" : "HTML"
         let label = request != nil ? (analysis.map { $0.state == "clean" ? "\(name) · Lint clean" : $0.state == "issues" ? "\(name) · \($0.diagnostics.count) lint findings" : "\(name) · Lint unavailable" } ?? "\(name) · Checking…") : (language.isEmpty ? "Code" : language)

@@ -1,18 +1,18 @@
 import AppKit
 
 enum ChatTabLayout {
-    static func titleLeading(running: Bool) -> CGFloat { running ? 58 : 40 }
-    static func reservedWidth(breathe: Bool, running: Bool) -> CGFloat {
-        titleLeading(running: running) + (breathe ? 30 : 38)
+    static let titleLeading: CGFloat = 40
+    static func reservedWidth(breathe: Bool) -> CGFloat {
+        titleLeading + 14
     }
     /// Keep the first three words intact, including room for a truncation mark
-    /// and the close button even when it appears on hover.
+    /// and room for the model icon.
     @MainActor
-    static func widths(title: String, breathe: Bool, running: Bool) -> (minimum: CGFloat, natural: CGFloat) {
+    static func widths(title: String, breathe: Bool) -> (minimum: CGFloat, natural: CGFloat) {
         let words = title.split(whereSeparator: \.isWhitespace)
         let prefix = words.count > 3 ? String(title[..<words[2].endIndex]) + "…" : title
-        let font = Typography.interfaceEmphasis
-        let chrome = reservedWidth(breathe: breathe, running: running)
+        let font = InterfaceTypography.font(Typography.paneTitle)
+        let chrome = reservedWidth(breathe: breathe)
         let minimum = max(breathe ? Breathe.tabMinimum : 116,
                           ceil((prefix as NSString).size(withAttributes: [.font: font]).width) + chrome + 4)
         let natural = max(minimum, min(breathe ? Breathe.tabMaximum : 240,

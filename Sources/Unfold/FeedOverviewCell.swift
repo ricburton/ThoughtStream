@@ -5,11 +5,17 @@ import AppKit
 /// appearances; an outline gives selection a stable, separate cue.
 @MainActor
 final class FeedOverviewRow: NSTableRowView {
+    /// Corner radius of the row's outer edge. The overview clips its scrolling
+    /// content to the same radius: a rounder mask cuts the selection outline
+    /// off the first and last rows.
+    static let cornerRadius: CGFloat = 8
+    private static let outlineInset: CGFloat = 1
     override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
     override func drawSelection(in dirtyRect: NSRect) {
         guard isSelected else { return }
         FeedPalette.blue.setStroke()
-        let outline = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 7, yRadius: 7)
+        let radius = Self.cornerRadius - Self.outlineInset
+        let outline = NSBezierPath(roundedRect: bounds.insetBy(dx: Self.outlineInset, dy: Self.outlineInset), xRadius: radius, yRadius: radius)
         outline.lineWidth = 1.5
         outline.stroke()
     }
@@ -34,9 +40,10 @@ final class FeedOverviewCell: NSView {
         name.cell?.wraps = created
         name.lineBreakMode = .byTruncatingTail
         let badge = FeedTypeBadge(kind: entry.overviewBadge, prominent: !activity)
+        badge.isHidden = !entry.showsOverviewBadge
         detail.font = reasoning ? Typography.caption : Typography.metadata
         detail.textColor = reasoning ? FeedPalette.text : FeedPalette.muted
-        detail.attributedStringValue = Typography.wrappingText(Self.detail(entry), font: detail.font!, color: detail.textColor!)
+        detail.attributedStringValue = Typography.wrappingText(entry.overviewDetail, font: detail.font!, color: detail.textColor!)
         detail.maximumNumberOfLines = reasoning ? 3 : activity ? 1 : 2; detail.lineBreakMode = .byTruncatingTail
         elapsed.font = Typography.timestamp; elapsed.textColor = FeedPalette.muted
         name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -71,12 +78,17 @@ final class FeedOverviewCell: NSView {
         NSLayoutConstraint.activate([
             name.leadingAnchor.constraint(equalTo: leadingAnchor, constant: titleInset), name.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6), name.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             badge.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8), badge.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 4), badge.heightAnchor.constraint(equalToConstant: 18),
-            elapsed.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 6), elapsed.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4), elapsed.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
-            detail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8), detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6), detail.topAnchor.constraint(equalTo: badge.bottomAnchor, constant: 3), detail.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -4)
+            elapsed.leadingAnchor.constraint(equalTo: entry.showsOverviewBadge ? badge.trailingAnchor : leadingAnchor, constant: entry.showsOverviewBadge ? 6 : 8),
+            elapsed.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4), elapsed.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
+            detail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8), detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            detail.topAnchor.constraint(equalTo: entry.showsOverviewMetadata ? badge.bottomAnchor : name.bottomAnchor, constant: 3),
+            detail.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -4)
         ])
         updateClock()
-        setAccessibilityLabel("\(entry.overviewBadge): \(entry.title)")
+        setAccessibilityLabel(entry.overviewAccessibilityLabel)
     }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); InterfaceTypography.apply(to: self) }
+
     required init?(coder: NSCoder) { fatalError("Not implemented") }
     override func draw(_ dirtyRect: NSRect) {
         guard entry.prominence == .created || entry.prominence == .reasoning else { return }
@@ -86,21 +98,20 @@ final class FeedOverviewCell: NSView {
         accent.withAlphaComponent(0.7).setFill()
         NSBezierPath(roundedRect: NSRect(x: 2, y: 8, width: 3, height: max(0, bounds.height - 16)), xRadius: 1.5, yRadius: 1.5).fill()
     }
-    private static func detail(_ entry: FeedHighlight) -> String {
-        entry.commandText.map { entry.summary == $0 ? $0 : entry.summary + "\n" + $0 } ?? entry.summary
-    }
     /// Text updates keep the card, spinner and selection in place. A visual
     /// category or command-state change needs a different set of controls.
     func update(_ value: FeedHighlight) -> Bool {
         guard entry.prominence == value.prominence, entry.overviewBadge == value.overviewBadge,
+              entry.showsOverviewBadge == value.showsOverviewBadge,
+              entry.showsOverviewMetadata == value.showsOverviewMetadata,
               entry.freshCode == value.freshCode, entry.command?.state == value.command?.state else { return false }
         entry = value
         if name.stringValue != value.title { name.stringValue = value.title }
-        let description = Self.detail(value)
+        let description = value.overviewDetail
         if detail.stringValue != description {
             detail.attributedStringValue = Typography.wrappingText(description, font: detail.font!, color: detail.textColor!)
         }
-        setAccessibilityLabel("\(value.overviewBadge): \(value.title)")
+        setAccessibilityLabel(value.overviewAccessibilityLabel)
         updateClock()
         return true
     }
@@ -110,7 +121,11 @@ final class FeedOverviewCell: NSView {
             let outcome = activity.state == .running ? "Running" : activity.state == .succeeded ? "Succeeded" : activity.state == .failed ? "Failed" : activity.state == .interrupted ? "Interrupted" : "Status unavailable"
             let exit = activity.exitCode.map { " · exit \($0)" } ?? ""
             elapsed.setAccessibilityLabel("\(outcome), \(elapsed.stringValue)\(exit)")
-            toolTip = "\(entry.title) · \(outcome) · \(elapsed.stringValue)\(exit)\n\(entry.commandText ?? entry.summary)"
-        } else { toolTip = "\(entry.title) [\(entry.kind)]\n\(entry.commandText ?? entry.summary)" }
+            let status = entry.title.caseInsensitiveCompare(outcome) == .orderedSame ? entry.title : "\(entry.title) · \(outcome)"
+            toolTip = ["\(status) · \(elapsed.stringValue)\(exit)", entry.overviewDetail]
+                .filter { !$0.isEmpty }.joined(separator: "\n")
+        } else {
+            toolTip = [entry.overviewAccessibilityLabel, entry.overviewDetail].filter { !$0.isEmpty }.joined(separator: "\n")
+        }
     }
 }

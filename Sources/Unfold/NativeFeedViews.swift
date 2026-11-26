@@ -54,6 +54,15 @@ final class NativeFeedScrollView: NSScrollView {
     var onScrollUp: (() -> Void)?
     var onUserScroll: (() -> Void)?
     var onWillResize: (() -> Void)?
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        // Clip the scrolling document itself, keeping overlay scrollers outside
+        // the mask and preserving the existing text layout and scroll geometry.
+        contentView.wantsLayer = true
+        contentView.layer?.cornerRadius = 20
+        contentView.layer?.masksToBounds = true
+    }
+    required init?(coder: NSCoder) { fatalError("Not implemented") }
     override func setFrameSize(_ newSize: NSSize) {
         if newSize != frame.size { onWillResize?() }
         super.setFrameSize(newSize)
@@ -255,22 +264,22 @@ final class NativeFeedTextView: NSTextView, NSTextViewDelegate {
     }
 }
 
-/// Long code, output and JSON open to their first lines. Expansion is
-/// remembered per block for the session, so it survives row recycling.
+/// Project changes and generated code open in full. Supporting responses open
+/// to a short preview. Reader overrides survive row recycling and streaming.
 @MainActor
 enum CodeCollapse {
     enum State: Equatable { case short, collapsed(lines: Int), expanded(lines: Int) }
-    static let visibleLines: CGFloat = 12
-    static let thresholdLines: CGFloat = 20
-    private static var expanded = Set<String>()
+    static let visibleLines: CGFloat = 8
+    static let thresholdLines: CGFloat = 10
+    private static var expanded: [String: Bool] = [:]
     /// Streaming only appends, so a block keeps its key while it grows. The
     /// label's lint status ("Python · Checking…") is left out: it changes later.
-    static func key(source: String, label: String) -> String {
-        (label.components(separatedBy: " · ").first ?? label) + "\u{0}" + String(source.prefix(512))
+    static func key(source: String, label: String, origin: FeedContentOrigin = .context) -> String {
+        origin.rawValue + "\u{0}" + (label.components(separatedBy: " · ").first ?? label) + "\u{0}" + String(source.prefix(512))
     }
-    static func isExpanded(_ key: String) -> Bool { expanded.contains(key) }
+    static func isExpanded(_ key: String) -> Bool { expanded[key] == true }
     static func setExpanded(_ value: Bool, key: String) {
-        if value { expanded.insert(key) } else { expanded.remove(key) }
+        expanded[key] = value
     }
     static func lineHeight(_ text: NSAttributedString) -> CGFloat {
         guard text.length > 0 else { return 20 }
@@ -284,7 +293,9 @@ enum CodeCollapse {
     static func state(_ text: NSAttributedString, source: String, label: String, fullHeight: CGFloat) -> State {
         guard fullHeight > lineHeight(text) * thresholdLines else { return .short }
         let lines = text.string.reduce(1) { $1 == "\n" ? $0 + 1 : $0 }
-        return isExpanded(key(source: source, label: label)) ? .expanded(lines: lines) : .collapsed(lines: lines)
+        let origin = FeedContentOrigin.read(from: text)
+        let opensExpanded = expanded[key(source: source, label: label, origin: origin)] ?? origin.opensExpanded
+        return opensExpanded ? .expanded(lines: lines) : .collapsed(lines: lines)
     }
 }
 
@@ -298,19 +309,26 @@ final class FeedPillButton: NSButton {
         self.title = title; self.target = target; self.action = action
         font = Typography.caption; bezelStyle = .inline; isBordered = false
         imagePosition = .imageLeading; imageHugsTitle = true
+        alignment = .center
+        setContentCompressionResistancePriority(.required, for: .horizontal)
         setSymbol(symbol)
         wantsLayer = true; layer?.cornerRadius = 7; layer?.borderWidth = 1
         updateColors()
     }
     required init?(coder: NSCoder) { fatalError("Not implemented") }
     func setSymbol(_ name: String) {
-        image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        symbol?.size = NSSize(width: 14, height: 14)
+        image = symbol
     }
     override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsetsZero }
     override var intrinsicContentSize: NSSize {
-        let size = super.intrinsicContentSize
+        // Inline button cells can under-measure the image beside a long title.
+        // Reserve the icon and its gap explicitly, in addition to both insets.
+        let titleWidth = (title as NSString).size(withAttributes: [.font: font ?? Typography.caption]).width
+        let contentWidth = ceil(titleWidth) + (image == nil ? 0 : 14 + 6)
         let textHeight = ceil((font?.ascender ?? 12) - (font?.descender ?? -3))
-        return NSSize(width: size.width + CopyFeedbackButton.padding.width * 2,
+        return NSSize(width: contentWidth + CopyFeedbackButton.padding.width * 2,
                       height: max(28, textHeight + CopyFeedbackButton.padding.height * 2))
     }
     override func updateTrackingAreas() {
@@ -348,6 +366,7 @@ final class CodeFadeView: NSView {
 final class NativeCodeView: NativeFeedCard {
     private(set) var source: String
     private let label: String
+    private let origin: FeedContentOrigin
     private let code: NativeFeedTextView
     private let copy: CopyFeedbackButton
     private let diffSummary: NSTextField?
@@ -360,25 +379,33 @@ final class NativeCodeView: NativeFeedCard {
     init(text: NSAttributedString, source: String, label: String, reveal: StreamTextRevealState? = nil) {
         self.source = source
         self.label = label
+        origin = FeedContentOrigin.read(from: text)
         code = NativeFeedTextView(text, reveal: reveal)
         copy = CopyFeedbackButton(text: source)
         diffSummary = label == "Diff" ? NSTextField(labelWithString: NativeDiff.summary(text)) : nil
         super.init(frame: .zero)
         clipsToBounds = true
         headerHeight = 42
-        let title = NSTextField(labelWithString: label)
-        let isPacket = label == "JSON"
-        title.font = isPacket ? Typography.metadata : Typography.section
-        title.textColor = isPacket ? FeedPalette.muted : FeedPalette.text
-        if isPacket { fill = .clear; drawsBorder = false; headerHeight = 0 }
+        let titleText = origin == .context ? label : origin.title + (["Text", "text", "Code"].contains(label) ? "" : " · " + label)
+        let title = NSTextField(labelWithString: titleText)
+        let isResponse = origin == .apiResponse || origin == .toolCall || origin == .output
+        title.font = isResponse ? Typography.caption : Typography.section
+        title.textColor = origin == .error ? FeedPalette.red : origin.opensExpanded ? FeedPalette.green : FeedPalette.muted
+        title.lineBreakMode = .byTruncatingTail
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        title.toolTip = titleText
+        if isResponse { fill = .clear; drawsBorder = false; headerHeight = 0 }
         diffSummary?.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
         diffSummary?.textColor = FeedPalette.muted
-        code.setAccessibilityLabel(label == "Diff" ? "Git diff: old and new line numbers, additions marked plus, removals marked minus" : "Code")
+        code.setAccessibilityLabel(titleText + (label == "Diff" ? ": old and new line numbers, additions marked plus, removals marked minus" : ""))
+        setAccessibilityLabel(titleText)
         toggle.isHidden = true
         fade.isHidden = true
         fade.color = fill == .clear ? FeedPalette.canvas : fill
         fade.onClick = { [weak self] in self?.setExpanded(true) }
         let header = NSStackView(views: [title] + (diffSummary.map { [$0] } ?? []) + [NSView(), toggle, copy]); header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 8
         for view in [header, code, fade] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
         NSLayoutConstraint.activate([
             fade.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 1), fade.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1),
@@ -404,22 +431,28 @@ final class NativeCodeView: NativeFeedCard {
         case .collapsed(let lines):
             toggle.isHidden = false; fade.isHidden = false; code.setLineLimit(Int(CodeCollapse.visibleLines))
             toggle.title = "Expand · \(lines) lines"; toggle.setSymbol("chevron.down")
-            toggle.toolTip = "Show the whole \(label == "JSON" ? "payload" : "block")"
-            toggle.setAccessibilityLabel("Expand \(label), \(lines) lines")
+            toggle.toolTip = "Show the whole \(origin == .apiResponse || origin == .output ? "response" : "block")"
+            toggle.setAccessibilityLabel("Expand \(origin.title), \(lines) lines")
         case .expanded:
             toggle.isHidden = false; fade.isHidden = true; code.setLineLimit(0)
             toggle.title = "Collapse"; toggle.setSymbol("chevron.up")
             toggle.toolTip = "Show only the first lines"
-            toggle.setAccessibilityLabel("Collapse \(label)")
+            toggle.setAccessibilityLabel("Collapse \(origin.title)")
         }
         toggle.invalidateIntrinsicContentSize()
     }
     func setExpanded(_ expanded: Bool) {
         guard collapse != .short, isCollapsed == expanded else { return }
-        CodeCollapse.setExpanded(expanded, key: CodeCollapse.key(source: source, label: label))
+        CodeCollapse.setExpanded(expanded, key: CodeCollapse.key(source: source, label: label, origin: origin))
         onToggle?(self)
     }
     @objc private func toggleExpanded() { setExpanded(isCollapsed) }
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard origin.opensExpanded else { return }
+        (origin == .error ? FeedPalette.red : FeedPalette.green).withAlphaComponent(0.7).setFill()
+        NSBezierPath(roundedRect: NSRect(x: 0, y: 10, width: 3, height: max(0, bounds.height - 20)), xRadius: 1.5, yRadius: 1.5).fill()
+    }
     required init?(coder: NSCoder) { fatalError("Not implemented") }
 }
 
@@ -524,7 +557,7 @@ final class NativeFeedRow: NSView {
                     (child as? NativeFeedTextView)?.update(text, reveal: state(text)); reused = true
                 case (.prose(_, let a), .prose(let text, let b)) where a == b:
                     (child as? NativeProseView)?.update(text, reveal: state(text)); reused = true
-                case (.code(_, _, let a), .code(let text, let source, let b)) where a == b:
+                case (.code(let previous, _, let a), .code(let text, let source, let b)) where a == b && FeedContentOrigin.read(from: previous) == FeedContentOrigin.read(from: text):
                     (child as? NativeCodeView)?.update(text: text, source: source, reveal: state(text)); reused = true
                 case (.header(let a, let b, let c, let d, let e), .header(let f, let g, let h, let i, let j)):
                     reused = a == f && b == g && c == h && d == i && e == j
@@ -627,7 +660,7 @@ final class NativeImageBlock: NSView {
     init(image: NSImage?, title: String, open: @escaping (NSImage) -> Void) {
         self.image = image; self.open = open; super.init(frame: .zero)
         label.stringValue = title.isEmpty ? "Image" : title
-        label.font = .systemFont(ofSize: 11); label.textColor = .secondaryLabelColor
+        label.font = Typography.prose(ofSize: 11); label.textColor = FeedPalette.muted
         button.target = self; button.action = #selector(show); button.bezelStyle = .inline; button.isEnabled = image != nil
         let header = NSStackView(views: [label, NSView(), button]); header.orientation = .horizontal
         imageView.image = image; imageView.imageScaling = .scaleProportionallyUpOrDown; imageView.animates = true
@@ -652,7 +685,7 @@ final class NativeHTMLBlock: NSView {
     private var pendingLoad: DispatchWorkItem?
     init(html: String, open: @escaping (String) -> Void) {
         self.html = html; self.open = open; super.init(frame: .zero)
-        let label = NSTextField(labelWithString: "HTML preview"); label.font = .systemFont(ofSize: 11); label.textColor = .secondaryLabelColor
+        let label = NSTextField(labelWithString: "HTML preview"); label.font = Typography.prose(ofSize: 11); label.textColor = FeedPalette.muted
         let button = NSButton(title: "Open window ↗", target: self, action: #selector(show)); button.bezelStyle = .inline
         let header = NSStackView(views: [label, NSView(), button]); header.orientation = .horizontal
         web.loadHTMLString(HTMLPreviewWindow.document(html), baseURL: nil)

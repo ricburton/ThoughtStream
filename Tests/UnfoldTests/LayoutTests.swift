@@ -30,7 +30,10 @@ final class LayoutTests: XCTestCase {
                 XCTAssertGreaterThan(rect.width, 60)
                 XCTAssertGreaterThanOrEqual(rect.minX, 0)
                 XCTAssertLessThan(rect.maxX, 280)
-                XCTAssertLessThan(rect.maxY, 120)
+                let chats = try XCTUnwrap(all.compactMap { $0 as? NSTextField }.first { $0.stringValue == "Chats" })
+                let heading = chats.convert(chats.bounds, to: root)
+                XCTAssertGreaterThan(rect.minY, heading.maxY)
+                XCTAssertLessThan(rect.maxY, root.bounds.height)
             }
         }
         let chat = WorkspaceWindow(restoredSessions: [session], stateStore: store)

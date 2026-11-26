@@ -16,7 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var workspace: WorkspaceWindow?
     private var appUpdater: AppUpdateController?
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Chats have their own tab bar; system window tabs would duplicate it
+        // Conversations occupy individual regions; system window tabs add another layer
         // and add "Merge All Windows" style items to the Window menu.
         NSWindow.allowsAutomaticWindowTabbing = false
         let workspace = WorkspaceWindow()
@@ -25,7 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         installMenu(for: workspace)
         workspace.showWindow(nil)
         ConnectivityMonitor.shared.start()
-        if !CommandLine.arguments.contains("--background") { NSApplication.shared.activate(ignoringOtherApps: true) }
+        if !CommandLine.arguments.contains("--background") { NSApplication.shared.activate() }
     }
     func applicationWillTerminate(_ notification: Notification) {
         ConnectivityMonitor.shared.stop()
@@ -91,10 +91,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
         let file = group("File", [
             entry("New Chat", #selector(WorkspaceWindow.newChat(_:)), "n"),
-            entry("Open Folder…", #selector(WorkspaceWindow.openProject(_:)), "o"),
+            entry("Open Project…", #selector(WorkspaceWindow.openProject(_:)), "o"),
             separator,
-            entry("Close Tab", #selector(WorkspaceWindow.closeTab(_:)), "w"),
-            entry("Reopen Closed Tab", #selector(WorkspaceWindow.reopenClosedTab(_:)), "t", [.command, .shift]),
+            entry("Close Chat", #selector(WorkspaceWindow.closeTab(_:)), "w"),
+            entry("Reopen Closed Chat", #selector(WorkspaceWindow.reopenClosedTab(_:)), "t", [.command, .shift]),
             separator,
             entry("Fork Session", #selector(WorkspaceWindow.forkSession(_:))),
             entry("Export Protocol…", #selector(WorkspaceWindow.exportLog(_:)), "e", [.command, .shift])
@@ -118,15 +118,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
 
         let view = group("View", [
-            entry("Previous Chat or Pane", #selector(WorkspaceWindow.selectPreviousTab(_:)), "[", [.command, .shift]),
-            entry("Next Chat or Pane", #selector(WorkspaceWindow.selectNextTab(_:)), "]", [.command, .shift]),
+            entry("Command Bar", #selector(WorkspaceWindow.toggleCommandBar(_:)), "/"),
             separator,
-            entry("Add Pane", #selector(WorkspaceWindow.splitStream(_:)), "p"),
-            entry("Stack", #selector(WorkspaceWindow.stackStream(_:)), "\\", [.command, .shift]),
-            entry("Focus Previous Pane", #selector(WorkspaceWindow.focusPreviousPane(_:)), "[", [.command, .option]),
-            entry("Focus Next Pane", #selector(WorkspaceWindow.focusNextPane(_:)), "]", [.command, .option]),
-            entry("Close Pane", #selector(WorkspaceWindow.closeFocusedPane(_:))),
-            entry("Single Pane", #selector(WorkspaceWindow.singlePane(_:))),
+            entry("Show logs", #selector(WorkspaceWindow.toggleChatDisplayMode(_:)), "l", [.command, .shift]),
+            separator,
+            entry("Focus Left", #selector(WorkspaceWindow.focusPreviousPane(_:)), "["),
+            entry("Focus Right", #selector(WorkspaceWindow.focusNextPane(_:)), "]"),
+            entry("Previous Chat", #selector(WorkspaceWindow.selectPreviousTab(_:)), "[", [.command, .shift]),
+            entry("Next Chat", #selector(WorkspaceWindow.selectNextTab(_:)), "]", [.command, .shift]),
+            entry("Project Up", #selector(WorkspaceWindow.selectPreviousProject(_:)), String(UnicodeScalar(NSUpArrowFunctionKey)!), [.command, .shift]),
+            entry("Project Down", #selector(WorkspaceWindow.selectNextProject(_:)), String(UnicodeScalar(NSDownArrowFunctionKey)!), [.command, .shift]),
+            separator,
+            entry("Split Right", #selector(WorkspaceWindow.splitStream(_:)), "p"),
+            entry("Split Above", #selector(WorkspaceWindow.splitAbove(_:))),
+            entry("Split Below", #selector(WorkspaceWindow.stackStream(_:)), "\\", [.command, .shift]),
+            entry("Move Chat Left", #selector(WorkspaceWindow.moveChatLeft(_:))),
+            entry("Move Chat Right", #selector(WorkspaceWindow.moveChatRight(_:))),
+            entry("Focus on This Chat", #selector(WorkspaceWindow.singlePane(_:))),
             separator,
             entry("Actual Size", #selector(WorkspaceWindow.resetText(_:)), "0"),
             entry("Larger Text", #selector(WorkspaceWindow.increaseText(_:)), "+"),
@@ -134,15 +142,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             separator,
             entry("Sample Feed", #selector(WorkspaceWindow.showSample(_:)))
         ], target: workspace)
-        // Keep pane-only commands together so Tabs Only can remove that section.
+        // Group chat arrangement commands together.
         if let splitIndex = view.items.firstIndex(where: { $0.action == #selector(WorkspaceWindow.splitStream(_:)) }), splitIndex > 0 {
             view.items[splitIndex - 1].identifier = NSUserInterfaceItemIdentifier("paneCommandsSeparator")
         }
         // Tidy any number of panes without closing or reordering their chats.
         if let singleIndex = view.items.firstIndex(where: { $0.action == #selector(WorkspaceWindow.singlePane(_:)) }) {
-            let arrangeItem = NSMenuItem(title: "Arrange Panes", action: nil, keyEquivalent: "")
+            let arrangeItem = NSMenuItem(title: "Arrange Chats", action: nil, keyEquivalent: "")
             arrangeItem.identifier = NSUserInterfaceItemIdentifier("paneArrangeMenu")
-            let arrangeMenu = NSMenu(title: "Arrange Panes")
+            let arrangeMenu = NSMenu(title: "Arrange Chats")
             arrangeItem.submenu = arrangeMenu
             for arrangement in PaneArrangement.allCases {
                 let item = arrangeMenu.addItem(withTitle: arrangement.title, action: #selector(WorkspaceWindow.arrangePanes(_:)),
@@ -154,18 +162,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             arrangeMenu.addItem(withTitle: "Even Out Sizes", action: #selector(WorkspaceWindow.balancePanes(_:)), keyEquivalent: "").target = workspace
             view.insertItem(arrangeItem, at: singleIndex + 1)
         }
-        let layoutItem = NSMenuItem(title: "Layout", action: nil, keyEquivalent: "")
-        let layoutMenu = NSMenu(title: "Layout")
-        layoutItem.submenu = layoutMenu
-        for mode in WorkspaceLayoutMode.allCases {
-            let item = layoutMenu.addItem(withTitle: mode.title, action: #selector(WorkspaceWindow.chooseWorkspaceLayout(_:)), keyEquivalent: "")
-            item.representedObject = mode.rawValue; item.target = workspace
-        }
-        view.insertItem(layoutItem, at: 0)
-        view.insertItem(.separator(), at: 1)
         // AppKit matches the shifted character on layouts where ⇧[ / ⇧] emit braces.
+        alias(view, #selector(WorkspaceWindow.toggleChatDisplayMode(_:)), "L", [.command, .shift])
         alias(view, #selector(WorkspaceWindow.selectPreviousTab(_:)), "{", [.command, .shift])
         alias(view, #selector(WorkspaceWindow.selectNextTab(_:)), "}", [.command, .shift])
+        alias(view, #selector(WorkspaceWindow.selectPreviousTab(_:)), "[", [.command, .option])
+        alias(view, #selector(WorkspaceWindow.selectNextTab(_:)), "]", [.command, .option])
         alias(view, #selector(WorkspaceWindow.splitStream(_:)), "\\")
         // ⌘+ needs Shift on most layouts; ⌘= is the conventional unshifted key.
         alias(view, #selector(WorkspaceWindow.increaseText(_:)), "=")
@@ -197,6 +199,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // An empty Help menu still provides the system's menu search field.
         NSApplication.shared.helpMenu = group("Help", [])
         NSApplication.shared.mainMenu = root
-        workspace.refreshLayoutMenu()
     }
 }

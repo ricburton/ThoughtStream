@@ -70,7 +70,10 @@ final class SplitStackTests: XCTestCase {
         guard case .split(true, let horizontalFraction, .pane, .split(false, let verticalFraction, .pane, .pane)) = saved.layout else {
             return XCTFail("Expected a split whose right pane is stacked")
         }
-        XCTAssertEqual(horizontalFraction, 0.61, accuracy: 0.01)
+        // The left pane grows from 50% to 61% of the original space; the right
+        // retains its original 50%, so the saved fraction uses the wider canvas.
+        let expectedHorizontalFraction = 0.61 / 1.11
+        XCTAssertEqual(horizontalFraction, expectedHorizontalFraction, accuracy: 0.01)
         XCTAssertEqual(verticalFraction, 0.45, accuracy: 0.01)
         let restored = WorkspaceWindow(restoredSessions: [original] + created, stateStore: store)
         defer { restored.stopAll(); restored.window?.close() }
@@ -81,7 +84,7 @@ final class SplitStackTests: XCTestCase {
         for split in dividers(restored) {
             let length = (split.isVertical ? split.bounds.width : split.bounds.height) - split.dividerThickness
             let firstLength = split.isVertical ? split.subviews[0].frame.width : split.subviews[0].frame.height
-            XCTAssertEqual(firstLength / length, split.isVertical ? 0.61 : 0.45, accuracy: 0.01)
+            XCTAssertEqual(firstLength / length, split.isVertical ? expectedHorizontalFraction : 0.45, accuracy: 0.01)
         }
     }
 
@@ -94,10 +97,9 @@ final class SplitStackTests: XCTestCase {
         defer { workspace.stopAll(); workspace.window?.close(); try? FileManager.default.removeItem(at: root) }
         workspace.window?.setContentSize(NSSize(width: 1400, height: 1000))
         let first = try XCTUnwrap(panes(workspace).first)
-        XCTAssertTrue(workspace.dropTab(ChatTabDrag(sessionID: sessions[1].id, columnID: first.columnID), on: .right, in: first))
-        let right = try XCTUnwrap(panes(workspace).last)
-        XCTAssertTrue(workspace.dropTab(ChatTabDrag(sessionID: sessions[2].id, columnID: first.columnID), on: .bottom, in: right))
-        let bottom = try XCTUnwrap(panes(workspace).last)
+        let right = panes(workspace)[1]
+        let bottom = panes(workspace)[2]
+        XCTAssertTrue(workspace.dropTab(ChatTabDrag(sessionID: sessions[2].id, columnID: bottom.columnID), on: .bottom, in: right))
         func assertSingleActivePane(_ expected: ChatColumn, file: StaticString = #filePath, line: UInt = #line) {
             XCTAssertEqual(panes(workspace).filter(\.isActivePane).map(\.columnID), [expected.columnID], file: file, line: line)
             for pane in panes(workspace) {

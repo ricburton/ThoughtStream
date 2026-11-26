@@ -17,6 +17,8 @@ Automatic development restarts are currently paused at the user's request.
 `~/Library/Caches/UnfoldNative/restarts-paused` makes the installer leave the app
 untouched unless `--no-open` is supplied. Manual app launches are unaffected.
 Keep that marker until the user asks to resume automatic development restarts.
+For an explicitly requested one-time restart, pass `--restart-once` to
+`Install-and-Restart.py`; this leaves the pause marker in place.
 The installer also skips an already installed, verified build, preventing a
 repeated one-shot invocation from becoming a restart loop. Never schedule the
 installer with launchd `KeepAlive`.

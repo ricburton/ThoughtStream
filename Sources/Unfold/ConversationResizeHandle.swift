@@ -5,7 +5,8 @@ import AppKit
 enum ConversationSplit {
     static let defaultFraction: CGFloat = 0.25
     static let minimumFraction: CGFloat = 0.04
-    static let maximumFraction: CGFloat = 0.85
+    // The endpoint means logs are fully collapsed, including after a resize.
+    static let maximumFraction: CGFloat = 1
     static let minimumHeight: CGFloat = 56
     static let minimumStreamHeight: CGFloat = 80
     static let defaultsKey = "conversationPaneFraction"
@@ -25,12 +26,12 @@ enum ConversationSplit {
     }
 }
 
-/// A thin, full-width grab strip over the divider between the activity stream
+/// A full-width grab strip over the divider between the activity stream
 /// and the conversation. Drag up to see more conversation, down to see less;
 /// double-click restores the default split.
 @MainActor
 final class ConversationResizeHandle: NSView {
-    static let thickness: CGFloat = 16
+    static let thickness: CGFloat = 22
     var onBegin: (() -> Void)?
     /// Vertical distance moved since the drag began, in points; upward is positive.
     var onDrag: ((CGFloat) -> Void)?
@@ -45,7 +46,7 @@ final class ConversationResizeHandle: NSView {
         setAccessibilityElement(true)
         setAccessibilityRole(.splitter)
         setAccessibilityLabel("Resize conversation")
-        toolTip = "Drag to resize the conversation · double-click to reset"
+        toolTip = "Drag up to hide logs, down to reveal them · double-click to reset"
     }
     required init?(coder: NSCoder) { fatalError("Not implemented") }
 
@@ -81,17 +82,31 @@ final class ConversationResizeHandle: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let active = hovering || startY != nil
         if InterfaceStyle.isBreathe {
-            // A short grabber that only firms up under the pointer.
+            // A substantial grip with a little lift, firmer under the pointer.
             FeedPalette.canvas.setFill()
-            NSRect(x: bounds.midX - 24, y: bounds.midY - 3, width: 48, height: 6).fill()
+            NSRect(x: bounds.midX - 26, y: bounds.midY - 5, width: 52, height: 10).fill()
+            NSGraphicsContext.saveGraphicsState()
+            let shadow = NSShadow()
+            shadow.shadowColor = NSColor.black.withAlphaComponent(active ? 0.18 : 0.12)
+            shadow.shadowBlurRadius = 3
+            shadow.shadowOffset = NSSize(width: 0, height: -1)
+            shadow.set()
             FeedPalette.muted.withAlphaComponent(active ? 0.85 : 0.35).setFill()
-            NSBezierPath(roundedRect: NSRect(x: bounds.midX - 16, y: bounds.midY - 2, width: 32, height: 4),
-                         xRadius: 2, yRadius: 2).fill()
+            NSBezierPath(roundedRect: NSRect(x: bounds.midX - 19, y: bounds.midY - 3.5, width: 38, height: 7),
+                         xRadius: 3.5, yRadius: 3.5).fill()
+            NSGraphicsContext.restoreGraphicsState()
             return
         }
-        let pill = NSBezierPath(roundedRect: NSRect(x: bounds.midX - 27, y: bounds.midY - 6, width: 54, height: 12),
-                                xRadius: 6, yRadius: 6)
+        let pill = NSBezierPath(roundedRect: NSRect(x: bounds.midX - 27, y: bounds.midY - 7, width: 54, height: 14),
+                                xRadius: 7, yRadius: 7)
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(active ? 0.18 : 0.12)
+        shadow.shadowBlurRadius = 3
+        shadow.shadowOffset = NSSize(width: 0, height: -1)
+        shadow.set()
         FeedPalette.input.setFill(); pill.fill()
+        NSGraphicsContext.restoreGraphicsState()
         (active ? NSColor.secondaryLabelColor : FeedPalette.line).setStroke()
         pill.lineWidth = 1; pill.stroke()
         NSColor.secondaryLabelColor.withAlphaComponent(active ? 1 : 0.75).setFill()

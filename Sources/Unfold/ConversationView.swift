@@ -113,6 +113,13 @@ final class ConversationView: NativeFeedCard, NSTextViewDelegate {
         ])
     }
     required init?(coder: NSCoder) { fatalError("Not implemented") }
+    func find(next: Bool = false) {
+        transcript.usesFindBar = true
+        window?.makeFirstResponder(transcript)
+        let command = NSMenuItem()
+        command.tag = Int((next ? NSFindPanelAction.next : .showFindPanel).rawValue)
+        transcript.performFindPanelAction(command)
+    }
     deinit { if let positionObserver { NotificationCenter.default.removeObserver(positionObserver) } }
 
     /// Shows a typing indicator beneath the latest message while a turn runs,

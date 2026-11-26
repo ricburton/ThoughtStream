@@ -4,6 +4,12 @@ import XCTest
 
 final class LastTabCloseTests: XCTestCase {
     @MainActor
+    private final class CloseTracker: NSObject {
+        var didClose = false
+        @objc func closed(_ notification: Notification) { didClose = true }
+    }
+
+    @MainActor
     private func columns(_ workspace: WorkspaceWindow) -> [ChatColumn] {
         func descend(_ controller: NSViewController) -> [ChatColumn] {
             if let column = controller as? ChatColumn { return [column] }
@@ -29,38 +35,117 @@ final class LastTabCloseTests: XCTestCase {
     }
 
     @MainActor
-    func testFinalTabClosesPaneAndPreservesOtherPaneAndRelaunch() throws {
+    func testClosingFinalChatMovesUpInRecencyOrderAndKeepsDrafts() throws {
+        for useShortcut in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let chats = (1...3).map { index -> Session in
+                let chat = session(index, project: root.appendingPathComponent("Project \(index)"), root: root)
+                chat.importSearchHistory([StreamRecord(kind: "You", text: "Work \(index)",
+                    time: Date(timeIntervalSince1970: Double(index * 100)))])
+                return chat
+            }
+            let store = WorkspaceStateStore(url: root.appendingPathComponent("workspace.json"))
+            let closing = chats[1], destination = chats[2]
+            store.save(WorkspaceSnapshot(drafts: [destination.id: "Destination draft"], selectedProject: closing.project.path,
+                projects: Dictionary(uniqueKeysWithValues: chats.map { ($0.project.path, state([[$0]])) })))
+            store.flush()
+            let workspace = WorkspaceWindow(restoredSessions: chats, stateStore: store)
+            defer { workspace.stopAll(); workspace.window?.close() }
+            let window = try XCTUnwrap(workspace.window)
+            let tracker = CloseTracker()
+            NotificationCenter.default.addObserver(tracker, selector: #selector(CloseTracker.closed(_:)),
+                name: NSWindow.willCloseNotification, object: window)
+            defer { NotificationCenter.default.removeObserver(tracker) }
+            let pane = try XCTUnwrap(columns(workspace).first)
+            pane.prompt.string = "Closing draft"
+            closing.turn = "still-working"
+            XCTAssertTrue(workspace.validateMenuItem(NSMenuItem(title: "Close Chat",
+                action: #selector(WorkspaceWindow.closeFocusedPane(_:)), keyEquivalent: "")))
+            workspace.toggleProjectHistory(closing.project.path)
+            if useShortcut { workspace.closeTab(nil) }
+            else { workspace.closePane(pane) }
+            XCTAssertFalse(tracker.didClose)
+            XCTAssertEqual(window.title, destination.title)
+            XCTAssertTrue(columns(workspace)[0].session === destination)
+            XCTAssertEqual(columns(workspace)[0].prompt.string, "Destination draft")
+            XCTAssertEqual(closing.turn, "still-working")
+            store.flush()
+            XCTAssertEqual(store.load()?.selectedProject, destination.project.path)
+            XCTAssertTrue(store.load()?.closedTabs?.contains(closing.id) == true)
+            workspace.selectProject(closing.project.path)
+            XCTAssertNil(columns(workspace)[0].session, "Returning to the project must not reopen the closed chat")
+            workspace.reopenClosedTab(nil)
+            XCTAssertTrue(columns(workspace)[0].session === closing)
+            XCTAssertEqual(columns(workspace)[0].prompt.string, "Closing draft")
+        }
+    }
+
+    @MainActor
+    func testClosingTopProjectWrapsAndClosingEmptyProjectNavigates() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let a = session(1, project: root.appendingPathComponent("A"), root: root)
+        let b = session(2, project: root.appendingPathComponent("B"), root: root)
+        let store = WorkspaceStateStore(url: root.appendingPathComponent("workspace.json"))
+        store.save(WorkspaceSnapshot(selectedProject: a.project.path,
+            projects: [a.project.path: state([[a]]), b.project.path: state([[b]])]))
+        store.flush()
+        let workspace = WorkspaceWindow(restoredSessions: [b, a], stateStore: store)
+        defer { workspace.stopAll(); workspace.window?.close() }
+        workspace.closeTab(nil)
+        XCTAssertTrue(columns(workspace)[0].session === b)
+        workspace.selectProject(a.project.path)
+        XCTAssertNil(columns(workspace)[0].session)
+        workspace.closeTab(nil)
+        XCTAssertTrue(columns(workspace)[0].session === b)
+    }
+
+    @MainActor
+    func testRepeatedCloseInOnlyProjectKeepsWindowOpen() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let chat = session(1, project: root, root: root)
+        let workspace = WorkspaceWindow(restoredSessions: [chat], stateStore: WorkspaceStateStore(url: root.appendingPathComponent("workspace.json")))
+        defer { workspace.stopAll(); workspace.window?.close() }
+        let tracker = CloseTracker()
+        NotificationCenter.default.addObserver(tracker, selector: #selector(CloseTracker.closed(_:)),
+            name: NSWindow.willCloseNotification, object: workspace.window)
+        defer { NotificationCenter.default.removeObserver(tracker) }
+        workspace.closeTab(nil)
+        workspace.closeTab(nil)
+        workspace.closePane(try XCTUnwrap(columns(workspace).first))
+        XCTAssertFalse(tracker.didClose)
+        XCTAssertNil(columns(workspace)[0].session)
+    }
+
+
+    @MainActor
+    func testClosingChatPreservesOtherRegionAndRelaunch() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let chats = (1...3).map { session($0, project: root, root: root) }
         let store = WorkspaceStateStore(url: root.appendingPathComponent("workspace.json"))
         store.save(WorkspaceSnapshot(selectedProject: root.path, projects: [root.path: state([[chats[0]], [chats[0], chats[2]]])]))
         store.flush()
-        // Storage order deliberately differs from the live list's UUID order.
         let workspace = WorkspaceWindow(restoredSessions: Array(chats.reversed()), stateStore: store)
         defer { workspace.stopAll(); workspace.window?.close() }
-        let panes = columns(workspace)
-        panes[1].prompt.string = "Keep the other pane's draft"
-        workspace.window?.makeFirstResponder(panes[1].prompt)
-        panes[0].onCloseChat?(2)
+        let regions = columns(workspace)
+        XCTAssertEqual(regions.count, 2)
+        regions[1].prompt.string = "Keep the other draft"
+        workspace.closePane(regions[0])
         XCTAssertEqual(columns(workspace).count, 1)
-        XCTAssertTrue(columns(workspace)[0] === panes[1])
-        XCTAssertTrue(panes[1].session === chats[0])
-        XCTAssertEqual(panes[1].tabIDs, [chats[0].id, chats[2].id])
-        XCTAssertEqual(panes[1].prompt.string, "Keep the other pane's draft")
-        XCTAssertTrue(workspace.window?.firstResponder === panes[1].prompt)
+        XCTAssertTrue(columns(workspace)[0] === regions[1])
+        XCTAssertTrue(regions[1].session === chats[2])
         workspace.stopAll()
         let restored = WorkspaceWindow(restoredSessions: chats, stateStore: store)
         defer { restored.stopAll(); restored.window?.close() }
-        let restoredPanes = columns(restored)
-        XCTAssertEqual(restoredPanes.count, 1)
-        XCTAssertTrue(restoredPanes[0].session === chats[0])
-        XCTAssertEqual(restoredPanes[0].tabIDs, [chats[0].id, chats[2].id])
-        XCTAssertEqual(restoredPanes[0].prompt.string, "Keep the other pane's draft")
+        XCTAssertEqual(columns(restored).count, 1)
+        XCTAssertTrue(columns(restored)[0].session === chats[2])
+        XCTAssertEqual(columns(restored)[0].prompt.string, "Keep the other draft")
     }
-
     @MainActor
-    func testFinalTabClosesWindowWithoutOpeningAnotherConversation() throws {
+    func testFinalChatLeavesEmptyWorkspaceWithoutOpeningAnotherConversation() throws {
         for closing in [1, 2] {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: root) }
@@ -73,7 +158,7 @@ final class LastTabCloseTests: XCTestCase {
             let pane = try XCTUnwrap(columns(workspace).first)
             workspace.closeTab(nil)
             XCTAssertNil(pane.session)
-            XCTAssertTrue(pane.tabIDs.isEmpty)
+            XCTAssertNil(pane.session)
             XCTAssertFalse(workspace.window?.isVisible ?? true)
             workspace.stopAll()
             XCTAssertTrue(store.load()?.closedTabs?.contains(chats[closing].id) == true)
@@ -93,11 +178,11 @@ final class LastTabCloseTests: XCTestCase {
         defer { workspace.stopAll(); workspace.window?.close() }
         workspace.closeTab(nil)
         XCTAssertNil(columns(workspace)[0].session)
-        XCTAssertTrue(columns(workspace)[0].tabIDs.isEmpty)
+        XCTAssertNil(columns(workspace)[0].session)
     }
 
     @MainActor
-    func testLastConversationClosesWindowAndDoesNotReappearOnRelaunch() throws {
+    func testLastConversationDoesNotReappearOnRelaunch() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let chat = session(1, project: root, root: root)
@@ -109,12 +194,12 @@ final class LastTabCloseTests: XCTestCase {
         workspace.closeTab(nil)
         XCTAssertEqual(columns(workspace).count, 1)
         XCTAssertNil(columns(workspace)[0].session)
-        XCTAssertTrue(columns(workspace)[0].tabIDs.isEmpty)
+        XCTAssertNil(columns(workspace)[0].session)
         workspace.stopAll()
         let restored = WorkspaceWindow(restoredSessions: [chat], stateStore: store)
         defer { restored.stopAll(); restored.window?.close() }
         XCTAssertNil(columns(restored)[0].session)
-        XCTAssertTrue(columns(restored)[0].tabIDs.isEmpty)
+        XCTAssertNil(columns(restored)[0].session)
         restored.reopenClosedTab(nil)
         XCTAssertTrue(columns(restored)[0].session === chat)
     }
@@ -134,7 +219,7 @@ final class LastTabCloseTests: XCTestCase {
         defer { workspace.stopAll(); workspace.window?.close() }
         workspace.closeTab(nil)
         XCTAssertNil(columns(workspace)[0].session)
-        XCTAssertTrue(columns(workspace)[0].tabIDs.isEmpty)
+        XCTAssertNil(columns(workspace)[0].session)
     }
 
     @MainActor
@@ -149,7 +234,7 @@ final class LastTabCloseTests: XCTestCase {
         defer { workspace.stopAll(); workspace.window?.close() }
         workspace.closeTab(nil)
         XCTAssertTrue(columns(workspace)[0].session === chats[2])
-        XCTAssertEqual(columns(workspace)[0].tabIDs, [chats[2].id])
+        XCTAssertEqual(columns(workspace)[0].session?.id, chats[2].id)
     }
 
     @MainActor

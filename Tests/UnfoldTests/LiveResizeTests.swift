@@ -70,10 +70,9 @@ final class LiveResizeTests: XCTestCase {
         let scroll = try XCTUnwrap(table.enclosingScrollView as? NativeFeedScrollView)
         scroll.onScrollUp?()
         let row = try XCTUnwrap(table.view(atColumn: 0, row: 0, makeIfNecessary: true) as? NativeFeedRow)
-        // Long code opens collapsed; the reader expands it before reading into it.
+        // Generated code opens in full, ready for reading and resizing.
         let card = try XCTUnwrap(descendants(row).compactMap { $0 as? NativeCodeView }.last)
-        card.setExpanded(true)
-        defer { CodeCollapse.setExpanded(false, key: CodeCollapse.key(source: card.source, label: "swift")) }
+        XCTAssertFalse(card.isCollapsed)
         split.view.layoutSubtreeIfNeeded()
         let code = try XCTUnwrap(descendants(row).compactMap { $0 as? NativeFeedTextView }.last)
         scroll.onUserScroll?()

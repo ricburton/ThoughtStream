@@ -1,7 +1,81 @@
 import AppKit
+import QuartzCore
 
 enum SidebarMetrics {
     static var rowHeight: CGFloat { InterfaceStyle.isBreathe ? Breathe.sidebarRowHeight : 30 }
+}
+
+/// Navigation and its contents share the same rounded outline.
+@MainActor
+final class SidebarSurface: WorkspaceSurface {
+    static let inset: CGFloat = 4
+    static let radius: CGFloat = 18
+
+    override init(fill: NSColor = FeedPalette.sidebar) {
+        super.init(fill: fill)
+        wantsLayer = true
+        layer?.cornerRadius = Self.radius
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
+        updateBorder()
+    }
+    required init?(coder: NSCoder) { fatalError("Not implemented") }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateBorder()
+    }
+
+    private func updateBorder() {
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        layer?.borderColor = (dark ? NSColor.white.withAlphaComponent(0.07) : NSColor.black.withAlphaComponent(0.04)).cgColor
+        layer?.borderWidth = 1
+    }
+}
+
+/// Draw inside the canvas so NSSplitView cannot clip the rail's drop shadow.
+/// This decoration never takes clicks, divider drags, or scroll-wheel events.
+@MainActor
+final class SidebarEdgeShadow: NSView {
+    var scrollOffset: CGFloat = 0 { didSet { if scrollOffset != oldValue { updateVisibility() } } }
+    var isSuppressed = false { didSet { if isSuppressed != oldValue { updateVisibility() } } }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        isHidden = true
+        setAccessibilityElement(false)
+    }
+    required init?(coder: NSCoder) { fatalError("Not implemented") }
+
+    private func updateVisibility() {
+        isHidden = isSuppressed || scrollOffset <= 0.5
+        needsDisplay = true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance(); needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard !isSuppressed, scrollOffset > 0.5,
+              let context = NSGraphicsContext.current?.cgContext else { return }
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let strength = min(1, max(0, (scrollOffset - 0.5) / 24))
+        context.saveGState()
+        context.clip(to: bounds)
+        context.setShadow(offset: CGSize(width: 2, height: 0), blur: 8,
+                          color: NSColor.black.withAlphaComponent(strength * (dark ? 0.10 : 0.05)).cgColor)
+        // The casting surface lies outside this view. Only its soft shadow is
+        // painted over the chats, with the same rounded corners as the rail.
+        let inset = SidebarSurface.inset
+        let caster = CGRect(x: -100, y: inset, width: 100 - inset, height: max(0, bounds.height - 2 * inset))
+        context.addPath(CGPath(roundedRect: caster, cornerWidth: SidebarSurface.radius, cornerHeight: SidebarSurface.radius, transform: nil))
+        context.setFillColor(NSColor.black.cgColor)
+        context.fillPath()
+        context.restoreGState()
+    }
 }
 
 /// Breathe separates the sidebar with space while keeping the divider draggable.
@@ -17,6 +91,10 @@ final class WorkspaceSplitView: NSSplitView {
 @MainActor
 final class SidebarSplitView: NSSplitView, NSSplitViewDelegate {
     var chatFraction: CGFloat = 2.0 / 3.0
+    /// Room for the project heading, two project rows and the model controls.
+    static let projectMinimum: CGFloat = 244
+    private var projectMinimum: CGFloat { Self.projectMinimum }
+    var minimumChatHeight: CGFloat = 160
     var onResize: (() -> Void)?
     private var arranging = false
     private var hoverArea: NSTrackingArea?
@@ -28,8 +106,8 @@ final class SidebarSplitView: NSSplitView, NSSplitViewDelegate {
         isVertical = false
         dividerStyle = .thin
         delegate = self
-        setAccessibilityLabel("Chats and folders")
-        setAccessibilityHelp("Drag the grip above Folders up or down to resize the folders list.")
+        setAccessibilityLabel("Chats, Projects, and Models")
+        setAccessibilityHelp("Drag the grip above Projects to resize the chat and project lists.")
     }
     required init?(coder: NSCoder) { fatalError("Not implemented") }
     override var dividerThickness: CGFloat { 20 }
@@ -72,18 +150,30 @@ final class SidebarSplitView: NSSplitView, NSSplitViewDelegate {
         arranging = true
         super.resizeSubviews(withOldSize: oldSize)
         let available = max(0, bounds.height - dividerThickness)
-        setPosition(min(max(available * chatFraction, 100), max(100, available - 112)), ofDividerAt: 0)
+        setPosition(min(max(available * chatFraction, minimumChatHeight), max(minimumChatHeight, available - projectMinimum)), ofDividerAt: 0)
         arranging = false
+        // NSSplitView clips its panes. The search field spans the chat pane's
+        // full width, so its focus ring would be cropped at both ends.
+        subviews.first?.clipsToBounds = false
         updateTrackingAreas()
     }
 
-    func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat { 100 }
+    func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat { minimumChatHeight }
     func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
-        max(100, bounds.height - dividerThickness - 112)
+        max(minimumChatHeight, bounds.height - dividerThickness - projectMinimum)
     }
     func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool { false }
+    override func setPosition(_ position: CGFloat, ofDividerAt dividerIndex: Int) {
+        super.setPosition(position, ofDividerAt: dividerIndex)
+        if !arranging { rememberDividerPosition() }
+    }
     func splitViewDidResizeSubviews(_ notification: Notification) {
         updateTrackingAreas()
+        // Auto Layout can deliver a second resize after resizeSubviews returns.
+        // Only a deliberate divider move should replace the saved proportion.
+        if dragging { rememberDividerPosition() }
+    }
+    private func rememberDividerPosition() {
         guard !arranging, let chats = subviews.first, bounds.height > dividerThickness else { return }
         chatFraction = chats.frame.height / (bounds.height - dividerThickness)
         onResize?()
@@ -112,7 +202,7 @@ final class SidebarActionButton: NSButton {
         // Symbol images are templates: tint them so they follow dark mode.
         let tint: NSColor = isEnabled ? .secondaryLabelColor : .tertiaryLabelColor
         (image?.withSymbolConfiguration(.init(paletteColors: [tint])) ?? image)?.draw(in: iconRect)
-        let attributes: [NSAttributedString.Key: Any] = [.font: Typography.interface, .foregroundColor: isEnabled ? NSColor.labelColor : NSColor.disabledControlTextColor]
+        let attributes: [NSAttributedString.Key: Any] = [.font: InterfaceTypography.font(Typography.interface), .foregroundColor: isEnabled ? FeedPalette.text : FeedPalette.muted]
         let label = NSAttributedString(string: title, attributes: attributes)
         label.draw(at: NSPoint(x: 30, y: (bounds.height - label.size().height) / 2))
         if window?.firstResponder === self {
@@ -141,6 +231,7 @@ final class SidebarProjectCell: NSTableCellView {
         icon.contentTintColor = runningCount > 0 ? .controlAccentColor : .secondaryLabelColor
         let nameLabel = NSTextField(labelWithString: name)
         nameLabel.font = Typography.interface
+        nameLabel.textColor = FeedPalette.text
         nameLabel.lineBreakMode = .byTruncatingMiddle
         let detail = "\(chatCount) \(chatCount == 1 ? "chat" : "chats")" + (runningCount > 0 ? " · \(runningCount) working" : "")
         let detailLabel = NSTextField(labelWithString: "\(chatCount)")
@@ -173,6 +264,7 @@ final class SidebarProjectCell: NSTableCellView {
         ])
     }
     required init?(coder: NSCoder) { fatalError("Not implemented") }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); InterfaceTypography.apply(to: self) }
 }
 
 
@@ -209,4 +301,5 @@ final class SidebarConversationCell: NSTableCellView {
         }
     }
     required init?(coder: NSCoder) { fatalError("Not implemented") }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); InterfaceTypography.apply(to: self) }
 }

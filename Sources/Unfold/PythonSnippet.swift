@@ -15,7 +15,7 @@ enum PythonSnippetExtractor {
             text = ([String(lines[prompt].dropFirst(2))] + Array(lines.dropFirst(prompt + 1))).joined(separator: "\n")
         }
         let words = tokens(text)
-        if let first = words.first, ["sh", "bash", "zsh"].contains(URL(fileURLWithPath: first).lastPathComponent),
+        if let first = words.first, ["sh", "bash", "zsh"].contains(basename(first)),
            let flag = words.indices.dropFirst().first(where: { words[$0].hasPrefix("-") && words[$0].dropFirst().contains("c") }), flag + 1 < words.count {
             return extract(from: words[flag + 1], depth: depth + 1)
         }
@@ -53,9 +53,14 @@ enum PythonSnippetExtractor {
         return snippets
     }
 
+    /// Plain string work: `URL(fileURLWithPath:)` traps on tokens such as `http://{host}/x`.
+    private static func basename(_ word: String) -> String {
+        word.split(separator: "/").last.map(String.init) ?? ""
+    }
+
     private static func pythonInvocation(_ words: [String]) -> Bool {
         guard let python = words.firstIndex(where: {
-            URL(fileURLWithPath: $0).lastPathComponent.range(of: "^(?:python(?:[0-9]+(?:\\.[0-9]+)*)?|pypy[0-9]*)$", options: .regularExpression) != nil
+            basename($0).range(of: "^(?:python(?:[0-9]+(?:\\.[0-9]+)*)?|pypy[0-9]*)$", options: .regularExpression) != nil
         }) else { return false }
         let prefix = Array(words[..<python])
         return prefix.isEmpty || prefix.allSatisfy { $0 == "env" || $0.range(of: "^[A-Za-z_][A-Za-z0-9_]*=", options: .regularExpression) != nil } || prefix == ["uv", "run"]

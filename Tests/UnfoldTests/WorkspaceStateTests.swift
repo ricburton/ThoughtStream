@@ -212,51 +212,31 @@ final class WorkspaceStateTests: XCTestCase {
         workspace.selectProject(a.project.path)
         XCTAssertEqual(columns(workspace).map { $0.session?.id }, [a.id])
     }
+
     @MainActor
-    func testClosingRightPaneTabsPreservesLeftPaneAndRestoresIndependentLists() throws {
+    func testClosingRightChatPreservesLeftChatDraftThroughRelaunch() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = WorkspaceStateStore(url: root.appendingPathComponent("workspace.json"))
-        let left = Session(project: root, title: "Left", storageRoot: root)
-        let right = Session(project: root, title: "Right", storageRoot: root)
-        let spare = Session(project: root, title: "Spare", storageRoot: root)
-        let sessions = [left, right, spare]
-        store.save(WorkspaceSnapshot(selectedProject: root.path, projects: [
-            root.path: ProjectViewState(primary: left.id, secondary: right.id)
-        ])); store.flush()
-        let workspace = WorkspaceWindow(restoredSessions: sessions, stateStore: store)
+        let chats = (0..<3).map { Session(project: root, title: "Chat \($0)", storageRoot: root) }
+        let workspace = WorkspaceWindow(restoredSessions: chats, stateStore: store)
         defer { workspace.stopAll(); workspace.window?.close() }
-        let panes = columns(workspace)
-        panes[0].prompt.string = "Keep this draft"
-        let originalTabs = panes[0].tabIDs
-        // Close the left pane's active chat from the RIGHT tab strip.
-        panes[1].onCloseChat?(0)
-        XCTAssertTrue(panes[0].session === left)
-        XCTAssertEqual(panes[0].prompt.string, "Keep this draft")
-        XCTAssertEqual(panes[0].tabIDs, originalTabs)
-        XCTAssertFalse(panes[1].tabIDs.contains(left.id))
-        XCTAssertTrue(panes[1].session === right)
-        // Closing the right active tab chooses its own next tab.
-        panes[1].onCloseChat?(1)
-        XCTAssertTrue(panes[1].session === spare)
-        XCTAssertTrue(panes[0].session === left)
-        // Closing its final tab removes the pane while preserving the left pane.
-        panes[1].onCloseChat?(2)
-        XCTAssertEqual(columns(workspace).count, 1)
-        XCTAssertTrue(columns(workspace)[0] === panes[0])
-        XCTAssertEqual(panes[0].tabIDs, originalTabs)
+        let regions = columns(workspace)
+        regions[0].prompt.string = "Keep this draft"
+        workspace.closePane(regions[1])
+        XCTAssertTrue(columns(workspace)[0] === regions[0])
+        XCTAssertEqual(columns(workspace).compactMap { $0.session?.id }, [chats[0].id, chats[2].id])
+        workspace.closePane(regions[2])
         workspace.stopAll()
-        let relaunched = WorkspaceWindow(restoredSessions: sessions, stateStore: store)
-        defer { relaunched.stopAll(); relaunched.window?.close() }
-        let restored = columns(relaunched)
-        XCTAssertEqual(restored.count, 1)
-        XCTAssertTrue(restored[0].session === left)
-        XCTAssertEqual(restored[0].tabIDs, originalTabs)
-        XCTAssertEqual(restored[0].prompt.string, "Keep this draft")
+        let restored = WorkspaceWindow(restoredSessions: chats, stateStore: store)
+        defer { restored.stopAll(); restored.window?.close() }
+        XCTAssertEqual(columns(restored).count, 1)
+        XCTAssertTrue(columns(restored)[0].session === chats[0])
+        XCTAssertEqual(columns(restored)[0].prompt.string, "Keep this draft")
     }
 
     @MainActor
-    func testRecursiveGridRestoresDraftsFocusAndCanKeepDividing() throws {
+    func testRecursiveGridRestoresDraftsFocusAndCanKeepMoving() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = WorkspaceStateStore(url: root.appendingPathComponent("workspace.json"))
@@ -264,38 +244,21 @@ final class WorkspaceStateTests: XCTestCase {
         let workspace = WorkspaceWindow(restoredSessions: sessions, stateStore: store)
         defer { workspace.stopAll(); workspace.window?.close() }
         workspace.window?.setContentSize(NSSize(width: 1400, height: 1000))
-        var panes = columns(workspace)
-        let first = panes[0]
-        for (session, side, target) in [(sessions[1], TabSplitSide.right, first),
-                                        (sessions[2], TabSplitSide.bottom, first)] {
-            XCTAssertTrue(workspace.dropTab(ChatTabDrag(sessionID: session.id, columnID: first.columnID), on: side, in: target))
-        }
-        panes = columns(workspace)
-        XCTAssertEqual(panes.count, 3)
-        let right = try XCTUnwrap(panes.first { $0.session === sessions[1] })
-        XCTAssertTrue(workspace.dropTab(ChatTabDrag(sessionID: sessions[3].id, columnID: first.columnID), on: .bottom, in: right))
-        panes = columns(workspace)
-        XCTAssertEqual(panes.count, 4)
-        let widths = panes.map { $0.view.bounds.width }, heights = panes.map { $0.view.bounds.height }
-        XCTAssertEqual(widths.max()!, widths.min()!, accuracy: 2)
-        XCTAssertEqual(heights.max()!, heights.min()!, accuracy: 2)
-        for (index, pane) in panes.enumerated() { pane.prompt.string = "Draft \(index)" }
-        let focused = panes[2]
-        workspace.window?.makeFirstResponder(focused.prompt)
+        workspace.arrangePanes(as: .grid)
+        let regions = columns(workspace)
+        for (index, region) in regions.enumerated() { region.prompt.string = "Draft \(index)" }
+        workspace.window?.makeFirstResponder(regions[2].prompt)
         workspace.stopAll()
         let restored = WorkspaceWindow(restoredSessions: sessions, stateStore: store)
         defer { restored.stopAll(); restored.window?.close() }
         let recovered = columns(restored)
-        XCTAssertEqual(recovered.map(\.columnID), panes.map(\.columnID))
-        XCTAssertEqual(recovered.map { $0.prompt.string }, panes.map { $0.prompt.string })
+        XCTAssertEqual(recovered.map(\.columnID), regions.map(\.columnID))
+        XCTAssertEqual(recovered.map { $0.prompt.string }, regions.map { $0.prompt.string })
         XCTAssertTrue(restored.window?.firstResponder === recovered[2].prompt)
-        let spare = sessions[4]
-        let owner = try XCTUnwrap(recovered.first { $0.tabIDs.contains(spare.id) })
-        XCTAssertTrue(restored.dropTab(ChatTabDrag(sessionID: spare.id, columnID: owner.columnID), on: .right, in: recovered[3]))
+        XCTAssertTrue(restored.dropTab(ChatTabDrag(sessionID: sessions[4].id, columnID: recovered[4].columnID), on: .bottom, in: recovered[0]))
         XCTAssertEqual(columns(restored).count, 5)
         restored.closePane(recovered[0])
         XCTAssertEqual(columns(restored).count, 4)
-        XCTAssertFalse(columns(restored).contains { $0 === recovered[0] })
         XCTAssertEqual(recovered[2].prompt.string, "Draft 2")
     }
 

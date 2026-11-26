@@ -28,7 +28,7 @@ final class FeedbackPolishTests: XCTestCase {
         let row = NativeFeedRow(blocks: blocks, width: 700, images: [:], openHTML: { _ in }, openImage: { _ in })
         let card = try XCTUnwrap(descendants(row).compactMap { $0 as? NativeCodeView }.first)
         guard case .code(let text, let blockSource, let label) = try XCTUnwrap(blocks.last) else { return XCTFail("Expected code") }
-        defer { CodeCollapse.setExpanded(false, key: CodeCollapse.key(source: blockSource, label: label)) }
+        defer { CodeCollapse.setExpanded(false, key: CodeCollapse.key(source: blockSource, label: label, origin: .output)) }
         XCTAssertTrue(card.isCollapsed)
         let collapsed = row.contentHeight
         let full = NativeFeedLayout.textHeight(text, width: 700 - 28 - 24)

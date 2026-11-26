@@ -79,11 +79,9 @@ final class StreamingPresentationTests: XCTestCase {
         let scroll = try XCTUnwrap(table.enclosingScrollView as? NativeFeedScrollView)
         scroll.onScrollUp?()
         let row = try XCTUnwrap(table.view(atColumn: 0, row: 0, makeIfNecessary: true))
-        // Long code opens collapsed; the reader expands it and keeps reading as it streams.
+        // Generated code stays open while the reader follows its implementation.
         let card = try XCTUnwrap(descendants(row).compactMap { $0 as? NativeCodeView }.first)
-        XCTAssertTrue(card.isCollapsed)
-        card.setExpanded(true)
-        defer { CodeCollapse.setExpanded(false, key: CodeCollapse.key(source: card.source, label: "swift")) }
+        XCTAssertFalse(card.isCollapsed)
         pane.view.layoutSubtreeIfNeeded()
         scroll.contentView.scroll(to: NSPoint(x: 0, y: 450))
         let text = try XCTUnwrap(descendants(row).compactMap { $0 as? NativeFeedTextView }.first)

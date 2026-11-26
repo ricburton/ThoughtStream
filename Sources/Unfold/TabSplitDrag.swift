@@ -45,6 +45,7 @@ final class TabSplitHostView: NSView {
     var onDrop: ((ChatTabDrag, TabSplitSide) -> Bool)?
     var hasSplit: (() -> Bool)?
     var dividerThickness: CGFloat = 1
+    var onLayout: (() -> Void)?
     private let preview = TabSplitPreview()
     private(set) var previewSide: TabSplitSide?
 
@@ -90,6 +91,7 @@ final class TabSplitHostView: NSView {
 
     override func layout() {
         super.layout()
+        onLayout?()
         if let side = previewSide { preview.frame = side.previewFrame(in: bounds, divider: dividerThickness) }
     }
     func showPreview(_ side: TabSplitSide) {

@@ -1,6 +1,6 @@
 # ThoughtStream
 
-A native Mac chat app for watching work as it happens. Built with an AppKit shell and a native, virtualized AppKit feed, local Codex and Claude Code connections, with their existing account sign-ins.
+ThoughtStream is a native Mac workspace for coding agents. Open a project folder, start a chat about its code, and watch commands, edits, diffs and replies arrive in the same feed. Keep a second conversation beside the first to review changes while another task runs. Chats and drafts are saved on your Mac.
 
 ## Screenshots
 
@@ -16,9 +16,15 @@ A native Mac chat app for watching work as it happens. Built with an AppKit shel
 
 **[Build 30 source prerelease](https://github.com/ricburton/ThoughtStream/releases/tag/v0.9.0-b30-source)** includes the multi-pane workspace shown above. [Build it from source](https://github.com/ricburton/ThoughtStream/blob/8f5a1aa829b5e9a5c67b36bb105ca2a7b7223751/README.md#build-from-source).
 
-This repository contains application source. Release downloads and the signed update feed live in [thoughtstream-releases](https://github.com/ricburton/thoughtstream-releases). Account credentials, chats and signing keys are kept outside the repository. Connect your own provider account after installation.
+[Download the latest notarized beta for Apple Silicon](https://github.com/ricburton/thoughtstream-releases#readme) · [Browse release notes](https://github.com/ricburton/thoughtstream-releases/releases) · [Report a problem](https://github.com/ricburton/thoughtstream-releases/issues)
 
-## Run
+1. On an Apple Silicon Mac running macOS 14 or later, download the ZIP and unzip it. Build 30 contains **ThoughtStream Beta.app**. Earlier betas contain **ThoughtStream.app**. Move the app to **Applications** and open that copy in Finder.
+2. Choose **ThoughtStream → Settings → Connect ChatGPT** and sign in with your own account. The packaged beta includes Codex. Claude Code, Gemini CLI and local models use their own installations in builds that support them.
+3. Open a project folder and start a chat. Try “Explain how this project starts up.” Open **Show logs** in build 30 to follow the agent’s commands and output.
+
+For subsequent betas, choose **ThoughtStream → Check for Updates…**. The app checks its signed beta feed every four hours. You choose when to install, and an update restart waits for active work to finish. The downloads page lists the build currently available through that feed.
+
+## Build from source
 
 Requires macOS 14+, Apple Command Line Tools, Python 3.11+, Node and npm.
 
@@ -87,17 +93,16 @@ Local chats need no account and no Internet. Each chat has its own connection an
 
 ## Everyday use
 
-- Choose **View → Layout → Tabs Only** for a single chat area with one tab bar. Use **+** or **⌘T** to open a tab, **⌘W** to close it, and **⌘⇧T** to reopen it. Closing the last tab leaves the workspace ready for a new chat. Open tabs and the selected chat are remembered per project. Choose **View → Layout → Panes** to restore the previous pane layout; the layout choice is remembered across launches.
-
-- Each project remembers its selected chats in both panes, split width, active pane, and each pane’s own open/closed tabs. Closing a tab affects only that pane. Returning to a project or relaunching restores that workspace, including drafts, text size, search, browsing positions, and Follow live settings. Window geometry is also saved.
-- The left sidebar lists open chats above Projects. Expand a project to browse its conversation history, select its name to restore its workspace, and use Open project… to add another folder. New chats stay in the selected project and explicitly join the matching ChatGPT/Codex desktop project when first sent. Saved project roots are matched by canonical folder path, with the most specific root preferred. If no unique root matches, choose an existing project or create one; that folder's choice is remembered. A folder name alone never silently assigns a chat to a project.
+- Each open conversation has its own pane, composer and reading position. Select an open chat in the sidebar to focus it. New chats appear in the chat list after their first message.
+- Each project restores its open chats, focused pane, drafts and layout. Large workspaces load offscreen transcripts as you reveal them.
+- Use the project list to open a folder or browse previous conversations. Press **⌘/** to open the Command Bar. **Just chat** hides logs when you want to focus on the conversation.
 - Every pane has a slim Highlights column with response snippets and typed sections (reasoning, JSON, HTML, Python, code and images). Click a highlight to jump to that part of the full feed; the down-arrow returns to live output.
 - One chronological stream keeps progress, reasoning summaries, commands, outputs, file changes and replies visible.
 - Your own messages have a light-blue surface in the stream, so they read apart from gray command and output cards.
 - Code, output, diff and JSON cards longer than 20 lines open collapsed to their first 12. Choose **Expand** beside Copy, or click the faded edge, to read the whole block; **Collapse** folds it again. Find and Overview jumps expand a card when the match is in its hidden lines. Expanded cards stay open until the app quits.
 - While a turn runs, the Conversation panel shows pulsing dots beneath the latest message with the current activity and elapsed time, such as “Running a command · 32s”. The dots hold still when Reduce Motion is on.
 - The status row names the Git branch the agent is working on, and the worktree when it is a linked one. It follows the checkout named by the latest commands, edits and tool calls, and otherwise shows the chat’s folder. Hover for the full path.
-- **Split stream** opens a separate chat with its own draft, Send/Steer and Stop controls. Switching chat tabs preserves each draft.
+- **Split Right** opens a separate chat with its own composer. Each pane keeps its draft when focus moves.
 - Markdown renders headings, lists, tables, links, blockquotes, inline code and fenced code.
 - JSON renders as a colored tree, fully expanded by default. Empty objects stay on one line and blank lines are removed without hiding any fields. Flat maps of short values, including category flags, flow left to right and wrap across the pane with every key and value visible.
 - Completed tool results (such as Claude's WebFetch or Read) show only their result text, formatted as Markdown under the tool's name, instead of the raw JSON envelope. **Copy raw JSON** still copies the original record.
@@ -106,13 +111,11 @@ Local chats need no account and no Internet. Each chat has its own connection an
 - Python heredocs and literal `python -c` commands display as extracted, formatted Python with native syntax coloring and real Ruff diagnostics. The copied Python is the displayed, formatted source; original commands remain in protocol exports. Python Markdown fences use the same renderer. Linting is static: it never executes the snippet, reads project lint configuration, or modifies the original command. The native Ruff executable is bundled for Apple Silicon and Intel.
 - The feed fills the available pane width. Each stream has **− / +** text controls (8–28) and a reset button; the chosen size is remembered. Smaller text also reduces content spacing.
 - **Return** sends; **Shift-Return** inserts a newline. During a turn it steers the ongoing work. **Stop** requests interruption.
-- Each tab reveals a small × close button on hover. **⌘W** closes the active tab; **⌘⇧T** reopens the last closed tab. Closing a tab preserves its history and draft, and closed tabs stay closed after restart.
 - **⌘N** (or **⌘T**) starts a chat in the focused pane; **⌘O** opens a project; **⌘F** searches the stream; **⌘+ / ⌘−** change text size.
 - **⌘P** (or **⌘\**) splits the focused pane to the right, starts a new chat, and focuses its composer.
-- There is no limit on panes. Up to ten columns (and five rows) share the pane area; past that it scrolls. Swipe sideways, hold Shift while scrolling, or click the small count at an edge (such as **3 ›**) to reach panes that are out of view; keyboard pane and tab navigation scrolls the destination into view. The window never grows to fit panes.
 - Panes adapt to the room they have. On a cramped display a pane can shrink to 170 points wide: its Split/Stack buttons become icons, the Highlights column and text-size controls step aside, and below 260 points the stream, conversation and composer text set smaller (86%, then 72% of your chosen size). A pane shorter than 380 points shows the full stream and the composer without the conversation panel. On a bigger display or window every pane gets wider and all of this returns; your chosen text size is never changed.
-- **View → Arrange Panes** tidies any number of panes: **Tidy into Grid** (⌃⌘G) picks a grid shaped for the window, **Side by Side** and **Stacked** make one row or column, and **Even Out Sizes** equalizes the current layout. Every pane keeps its tabs, draft and reading position.
-- **⌘⇧[ / ⌘⇧]** switch to the previous or next chat in tab order, continuing into adjacent panes and wrapping at either end. Keyboard focus follows to the destination composer.
+- **View → Arrange Chats** tidies any number of panes: **Tidy into Grid** (⌃⌘G) picks a grid shaped for the window, **Side by Side** and **Stacked** make one row or column, and **Even Out Sizes** equalizes the current layout. Every pane keeps its tabs, draft and reading position.
+- **⌘⇧[ / ⌘⇧]** switch to the previous or next chat in pane order and wrapping at either end. Keyboard focus follows to the destination composer.
 - The sliders button reveals model, reasoning effort and speed settings. Model options come from the connected runtime; faster tiers depend on account availability and may use more allowance.
 - **More** contains split stream, pending requests, protocol export and fork.
 - Select text and choose **Ask about selection** to bring it into your next message.
@@ -149,7 +152,7 @@ The live test uses the current Codex ChatGPT sign-in and a small amount of its a
 
 ## Scope
 
-This is a personal beta. Notarized releases use the release pipeline above; local development builds are not notarized. The bundled runtime is pinned. Sparkle checks the signed beta feed and provides Check for Updates; installation requires approval and an update restart waits for active work to finish. Large history paging, attachments and comprehensive accessibility coverage are future work. Python syntax coloring is native Swift; formatting and linting use Ruff. Inline linting covers literal snippets up to 256 KiB, not file-path-only commands or dynamically generated shell code. Other code syntax coloring is lexical. Markdown and JSON formatting use Swift and NSAttributedString; legacy web-renderer source is excluded from the app bundle. Ruff’s provenance and license are in `Sources/Unfold/Tools`.
+This is a personal beta. Notarized releases use the release pipeline above; local development builds are not notarized. The bundled runtime is pinned. Sparkle checks the signed beta feed and provides Check for Updates; installation requires approval and an update restart waits for active work to finish.  Python syntax coloring is native Swift; formatting and linting use Ruff. Inline linting covers literal snippets up to 256 KiB, not file-path-only commands or dynamically generated shell code. Other code syntax coloring is lexical. Markdown and JSON formatting use Swift and NSAttributedString; legacy web-renderer source is excluded from the app bundle. Ruff’s provenance and license are in `Sources/Unfold/Tools`.
 
 ThoughtStream displays available reasoning summaries and observable activity. The model's private internal reasoning is not supplied. UI batching improves local rendering behavior; model response speed still depends on the selected model, service tier and network.
 

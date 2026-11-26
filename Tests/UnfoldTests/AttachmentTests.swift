@@ -68,4 +68,47 @@ final class AttachmentTests: XCTestCase {
         XCTAssertEqual(column.attachments, [image])
         XCTAssertEqual(column.prompt.string, "First")
     }
+
+    @MainActor
+    func testImageFilePreflightAndImportUseTheSameTypes() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let image = root.appendingPathComponent("image.png")
+        let text = root.appendingPathComponent("notes.txt")
+        try png().write(to: image)
+        try Data("notes".utf8).write(to: text)
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        board.writeObjects([text as NSURL])
+        XCTAssertFalse(ChatAttachment.accepts(board))
+        XCTAssertTrue(ChatAttachment.sources(from: board).isEmpty)
+        board.clearContents()
+        board.writeObjects([text as NSURL, image as NSURL])
+        XCTAssertTrue(ChatAttachment.accepts(board))
+        let sources = ChatAttachment.sources(from: board)
+        XCTAssertEqual(sources.count, 1)
+        guard case .file(let imported) = sources.first else { return XCTFail("Expected the image file") }
+        XCTAssertEqual(imported, image)
+    }
+
+    @MainActor
+    func testImageAvailabilityDoesNotRequestPromisedClipboardData() {
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        let provider = DeferredImageProvider()
+        let item = NSPasteboardItem()
+        item.setDataProvider(provider, forTypes: [.png])
+        board.writeObjects([item])
+        XCTAssertTrue(ChatAttachment.accepts(board))
+        XCTAssertEqual(provider.requests, 0)
+    }
+}
+
+private final class DeferredImageProvider: NSObject, NSPasteboardItemDataProvider {
+    var requests = 0
+    func pasteboard(_ pasteboard: NSPasteboard?, item: NSPasteboardItem, provideDataForType type: NSPasteboard.PasteboardType) {
+        requests += 1
+        item.setData(Data(), forType: type)
+    }
 }

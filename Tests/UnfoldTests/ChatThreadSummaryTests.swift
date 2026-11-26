@@ -1,21 +1,84 @@
+import AppKit
 import XCTest
 @testable import ThoughtStream
 
 @MainActor
 final class ChatThreadSummaryTests: XCTestCase {
-    func testTranscriptUsesOriginalGoalAndRecentChatWithoutTools() throws {
+    func testTranscriptKeepsUserRequestThroughLongAssistantUpdatesWithoutTools() throws {
         var records = [StreamRecord(kind: "You", text: "Fix the sidebar")]
         records += (0..<20).map { StreamRecord(kind: "Agent", text: "Reply \($0)") }
         records += [StreamRecord(kind: "Command", text: "private command output"),
                     StreamRecord(kind: "Reasoning summary", text: "private reasoning")]
         let input = try XCTUnwrap(ChatThreadSummary.input(records, provider: .codex))
         XCTAssertTrue(input.transcript.contains("Fix the sidebar"))
-        XCTAssertTrue(input.transcript.contains("Reply 19"))
+        XCTAssertFalse(input.transcript.contains("Reply 19"))
         XCTAssertFalse(input.transcript.contains("Reply 0"))
         XCTAssertFalse(input.transcript.contains("private"))
+        XCTAssertEqual(ChatThreadSummary.input(records + [StreamRecord(kind: "Agent", text: "One more streaming update")], provider: .codex), input)
         XCTAssertEqual(ChatThreadSummary.input(records + [StreamRecord(kind: "Session", text: "Ready")], provider: .codex), input)
         XCTAssertNotEqual(ChatThreadSummary.input(records + [StreamRecord(kind: "You", text: "Now fix search")], provider: .codex), input)
         XCTAssertNil(ChatThreadSummary.input([StreamRecord(kind: "Session", text: "Connected")], provider: .codex))
+    }
+
+    func testRecentTopicReplacesOriginalGoalWhileKeepingFollowUpContext() throws {
+        let records = [
+            StreamRecord(kind: "You", text: "Compare AI energy with flying"),
+            StreamRecord(kind: "Agent", text: "Here is an energy comparison"),
+            StreamRecord(kind: "You", text: "Make the bottom horizontal scroller smaller"),
+            StreamRecord(kind: "Agent", text: "Reduced the scroller height"),
+            StreamRecord(kind: "You", text: "Update chat titles as the topic changes"),
+            StreamRecord(kind: "Agent", text: "Titles will follow the latest topic"),
+            StreamRecord(kind: "You", text: "Remove bold from those titles")
+        ]
+        let input = try XCTUnwrap(ChatThreadSummary.input(records, provider: .codex))
+        XCTAssertFalse(input.transcript.contains("energy"))
+        XCTAssertTrue(input.transcript.contains("Update chat titles as the topic changes"))
+        XCTAssertTrue(input.transcript.contains("Latest user request: Remove bold from those titles"))
+    }
+
+    func testActiveTopicChangeRefreshesHeaderAndSurvivesRestore() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let session = Session(project: root, title: "AI energy comparison", storageRoot: root)
+        let coordinator = ChatThreadSummaryCoordinator()
+        let column = ChatColumn()
+        defer { coordinator.stop(); session.stop(); try? FileManager.default.removeItem(at: root) }
+        session.report(.user, "Compare AI energy with flying")
+        session.sidebarSummary = "AI energy comparison"
+        session.sidebarSummaryFingerprint = ChatThreadSummary.input(session.history, provider: session.provider)?.fingerprint
+        column.display(session)
+        XCTAssertEqual(column.chatTitle.title, "AI energy comparison")
+
+        session.report(.user, "Make the horizontal scroller smaller")
+        session.turn = "active-turn"
+        let updated = expectation(description: "Header follows active topic")
+        coordinator.schedule([session], generate: { _, input in
+            XCTAssertEqual(session.turn, "active-turn")
+            XCTAssertTrue(input.transcript.contains("Latest user request: Make the horizontal scroller smaller"))
+            session.report(.prose, "I am resizing the scroller")
+            return "Smaller horizontal scroller"
+        }, updated: {
+            column.updateHeader()
+            updated.fulfill()
+        })
+        await fulfillment(of: [updated], timeout: 5)
+        XCTAssertEqual(column.chatTitle.title, "Smaller horizontal scroller")
+        XCTAssertTrue(column.chatTitle.toolTip?.hasPrefix("Smaller horizontal scroller") == true)
+        XCTAssertTrue(column.chatTitle.accessibilityLabel()?.hasPrefix("Smaller horizontal scroller") == true)
+        XCTAssertEqual(session.title, "AI energy comparison")
+
+        let redundant = expectation(description: "Streaming and completion reuse the current title")
+        redundant.isInverted = true
+        session.report(.prose, "Reduced the bottom scroller height")
+        session.turn = nil
+        coordinator.schedule([session], generate: { _, _ in
+            redundant.fulfill(); return "Unexpected replacement"
+        }, updated: {})
+        await fulfillment(of: [redundant], timeout: 1.2)
+
+        let restored = Session(project: root, id: session.id, title: session.title, storageRoot: root)
+        defer { restored.stop() }
+        column.display(restored)
+        XCTAssertEqual(column.chatTitle.title, "Smaller horizontal scroller")
     }
 
     func testProviderResponsesAreTerseAndRejectErrors() {
@@ -26,6 +89,34 @@ final class ChatThreadSummaryTests: XCTestCase {
         XCTAssertNil(ChatThreadSummary.output(Data("{\"result\":\"Sign in first\",\"is_error\":true}".utf8), provider: .claude))
         XCTAssertEqual(ChatThreadSummary.clean("  **Sidebar chat summaries.**  "), "Sidebar chat summaries")
         XCTAssertNil(ChatThreadSummary.clean("Here is a summary:\nSidebar chats"))
+    }
+
+    func testWindowTitleFollowsCurrentTopic() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let session = Session(project: root, title: "Original topic", storageRoot: root)
+        session.report(.user, "Now improve search")
+        let workspace = WorkspaceWindow(restoredSessions: [session],
+            stateStore: WorkspaceStateStore(url: root.appendingPathComponent("workspace.json")))
+        defer { workspace.stopAll(); workspace.window?.close(); try? FileManager.default.removeItem(at: root) }
+        session.sidebarSummary = "Improve chat search"
+        session.onStatus?("Agent is working")
+        XCTAssertEqual(workspace.window?.title, "Improve chat search")
+        XCTAssertEqual(session.title, "Original topic")
+    }
+
+    func testQueuedRequestDoesNotRenameChatBeforeDelivery() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let session = Session(project: root, title: "Original topic", storageRoot: root)
+        let coordinator = ChatThreadSummaryCoordinator()
+        defer { coordinator.stop(); session.stop(); try? FileManager.default.removeItem(at: root) }
+        try session.enqueueChat("An unsent new topic", attachments: [], settings: .preferred)
+        let attempted = expectation(description: "Queued request is not summarized")
+        attempted.isInverted = true
+        coordinator.schedule([session], generate: { _, _ in
+            attempted.fulfill(); return "An unsent topic"
+        }, updated: {})
+        await fulfillment(of: [attempted], timeout: 1.2)
+        XCTAssertNil(session.sidebarSummary)
     }
 
     func testSummaryPersistsSeparatelyFromOriginalTitle() async throws {

@@ -144,10 +144,12 @@ def publish(output, archive, appcast, tag, version, build, previous_sha, tools):
     notes = output / "release-notes.md"
     notes.write_text(f"""ThoughtStream {version} beta (build {build})
 
+ThoughtStream is a native Mac workspace for coding agents. Open a project folder and follow commands, edits, and replies in one feed. Keep several chats open side by side while you work.
+
 For Apple Silicon Macs running macOS 14 or later.
 
 1. Download `{archive.name}` and unzip it.
-2. Move **ThoughtStream.app** to **Applications**, then open it.
+2. Move **ThoughtStream Beta.app** to **Applications**, then open it.
 3. Open **ThoughtStream → Settings → Connect ChatGPT** and sign in with your own account.
 
 This beta is Developer ID signed and notarized by Apple. It includes Codex and the offline tools.
@@ -176,11 +178,13 @@ Report problems at https://github.com/{REPOSITORY}/issues. Avoid including priva
         "--jq", ".commit.html_url")
     readme = f"""# ThoughtStream Beta
 
+ThoughtStream lets you work with coding agents in a native Mac app. Open a project folder, ask about its code and follow commands, edits and replies as they happen. Each conversation keeps its draft and reading position on your Mac.
+
 [Download ThoughtStream {version} Beta ({build})](https://github.com/{REPOSITORY}/releases/download/{tag}/{archive.name})
 
 For Apple Silicon Macs running macOS 14 or later. This release is Developer ID signed and notarized by Apple.
 
-Unzip the download, move **ThoughtStream.app** to **Applications**, then open it.
+Unzip the download, move **ThoughtStream Beta.app** to **Applications**, then open it.
 Connect your own ChatGPT account in **ThoughtStream → Settings → Connect ChatGPT**.
 Codex and offline tools are included; Claude Code is an optional separate installation.
 
@@ -222,12 +226,16 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
     print(f"Release work directory (retained): {work}", flush=True)
     prepared = work / "Prepared"
-    app = prepared / "ThoughtStream Install/ThoughtStream.app"
+    app = prepared / "ThoughtStream Install/ThoughtStream Beta.app"
     if not (work / "prepared.json").exists():
         if prepared.exists():
             raise SystemExit(f"Incomplete preparation at {prepared}; retain it for diagnosis and use a new --work-dir")
         run("python3", ROOT / "Scripts/Package-For-Friend.py", "--work-dir", work / "Build", "--output-dir", prepared, "--no-archive")
         save(work / "prepared.json", {"app": str(app), "created_utc": stamp})
+    # Resume packages assembled before the beta bundle was renamed.
+    legacy_app = app.with_name("ThoughtStream.app")
+    if not app.exists() and legacy_app.exists():
+        legacy_app.rename(app)
     info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
     version, build = info["CFBundleShortVersionString"], info["CFBundleVersion"]
     if args.prepare_only:

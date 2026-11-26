@@ -11,8 +11,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             switch self {
             case .split: return "Side by side"
             case .stack: return "Stacked"
-            case .closePane: return "Close pane"
-            case .singlePane: return "Single pane"
+            case .closePane: return "Close chat"
+            case .singlePane: return "Focus on this chat"
             case .fork: return "Fork chat"
             case .requests: return "View requests"
             case .snapshot: return "View snapshot"
@@ -33,19 +33,39 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             case .developer: return "chevron.left.forwardslash.chevron.right"
             }
         }
+
+        var tint: NSColor {
+            switch self {
+            case .general: return FeedPalette.blue
+            case .accounts: return FeedPalette.purple
+            case .localModels: return FeedPalette.green
+            case .chat: return FeedPalette.orange
+            case .developer: return FeedPalette.muted
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .general: return "Arrange your workspace."
+            case .accounts: return "Connect the services you use in ThoughtStream."
+            case .localModels: return "Models on your Mac and servers you connect."
+            case .chat: return "Continue and manage your current conversation."
+            case .developer: return "Inspect session activity and troubleshoot issues."
+            }
+        }
     }
 
     private let navigation = NSTableView()
     private let pageTitle = NSTextField(labelWithString: "General")
+    private let pageSubtitle = NSTextField(wrappingLabelWithString: "")
     private let scrollView = NSScrollView()
     private let pageDocument = FlippedSettingsView()
     private var pages: [Page: NSStackView] = [:]
     private var pageConstraints: [NSLayoutConstraint] = []
-    private var paneLayoutSection: NSView?
-    private var tabsOnlyNote: NSTextField?
     private let localModels: LocalModelRegistry
     private let localRuntimeRows = NSStackView()
     private let localScanStatus = NSTextField(labelWithString: "")
+    private var styleObserver: NSObjectProtocol?
     private var localObserver: NSObjectProtocol?
     private var localScan: Task<Void, Never>?
     /// Set by the workspace. Off by default, so a bare settings window never
@@ -55,7 +75,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     init(target: AnyObject, actions: [Action: Selector], chatGPTButton: NSButton,
          claudeButton: NSButton, claudeStatus: NSTextField, localModels: LocalModelRegistry? = nil) {
         self.localModels = localModels ?? .shared
-        let panel = SettingsPanel(contentRect: NSRect(x: 0, y: 0, width: 840, height: 600),
+        let panel = SettingsPanel(contentRect: NSRect(x: 0, y: 0, width: 900, height: 640),
                                   styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         panel.title = "Settings"
         panel.titlebarAppearsTransparent = true
@@ -64,24 +84,20 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         super.init(window: panel)
 
         func button(_ action: Action) -> NSButton {
-            let control = NSButton(title: action.title, target: target, action: actions[action])
+            let control = ThemedButton(title: action.title, target: target, action: actions[action])
             control.bezelStyle = .rounded
             control.font = Typography.interface
             control.setContentHuggingPriority(.required, for: .horizontal)
             return control
         }
 
-        let layoutSection = section("Workspace layout", rows: [
-                row("Add a pane", detail: "Open another view beside or below the current pane.",
+        let layoutSection = section("Chats", rows: [
+                row("Open another chat", detail: "Keep another chat in view.",
                     controls: [button(.split), button(.stack)]),
-                row("Simplify your workspace", detail: "Close the focused pane or return to a single pane.",
+                row("Simplify your workspace", detail: "Close this chat or focus on just one.",
                     controls: [button(.closePane), button(.singlePane)])
             ])
-        paneLayoutSection = layoutSection
-        let tabsNote = text("Tabs Only is on. Open chats with + and close them with ×. Change layouts in View → Layout.", secondary: true)
-        tabsNote.isHidden = true
-        tabsOnlyNote = tabsNote
-        pages[.general] = page([layoutSection, tabsNote], note: "Layout changes apply to the current workspace.")
+        pages[.general] = page([layoutSection], note: "Each chat has its own region of the screen.")
 
         chatGPTButton.bezelStyle = .rounded
         chatGPTButton.font = Typography.interface
@@ -93,30 +109,34 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         claudeStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         pages[.accounts] = page([
             section("Connected services", rows: [
-                row("ChatGPT", detail: "Use your ChatGPT account with Codex.", controls: [chatGPTButton]),
+                row("ChatGPT", detail: "Connect your account to use Codex.", controls: [chatGPTButton]),
                 row("Claude", detailView: claudeStatus, controls: [claudeButton])
             ])
-        ], note: "Choose a service in the main sidebar. Existing chats keep the service they started with.")
+        ], note: "Choose a service in the sidebar when starting a chat. Existing chats keep their service.")
 
         pages[.localModels] = makeLocalModelsPage()
 
         pages[.chat] = page([
             section("Current conversation", rows: [
-                row("Start a branch", detail: "Continue from this conversation in a new chat.", controls: [button(.fork)]),
-                row("Pending requests", detail: "Review requests waiting for your response.", controls: [button(.requests)])
+                row("Branch this conversation", detail: "Continue in a new chat from this point.", controls: [button(.fork)]),
+                row("Pending requests", detail: "Review anything waiting for your response.", controls: [button(.requests)])
             ])
         ], note: "These actions use the focused conversation.")
 
         pages[.developer] = page([
             section("Diagnostics", rows: [
-                row("Protocol snapshot", detail: "Inspect the current session’s protocol messages.", controls: [button(.snapshot)]),
-                row("Export protocol", detail: "Save session diagnostics to a file.", controls: [button(.export)])
+                row("Protocol snapshot", detail: "Inspect messages from the current session.", controls: [button(.snapshot)]),
+                row("Export protocol", detail: "Save diagnostics for this session.", controls: [button(.export)])
             ])
         ], note: "Diagnostics apply to the focused conversation.")
 
         buildLayout(in: panel)
         navigation.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         showPage(.general)
+        applyInterfaceStyle()
+        styleObserver = NotificationCenter.default.addObserver(forName: InterfaceStyle.didChange, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.applyInterfaceStyle() }
+        }
         panel.center()
         // A preferences window shouldn't take over a Space; reopen where it was left.
         panel.collectionBehavior.insert(.fullScreenNone)
@@ -125,7 +145,16 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    deinit { if let localObserver { NotificationCenter.default.removeObserver(localObserver) } }
+    deinit {
+        if let localObserver { NotificationCenter.default.removeObserver(localObserver) }
+        if let styleObserver { NotificationCenter.default.removeObserver(styleObserver) }
+    }
+
+    private func applyInterfaceStyle() {
+        window?.appearance = InterfaceStyle.current.appearance
+        if let content = window?.contentView { InterfaceTypography.apply(to: content) }
+        for page in pages.values { InterfaceTypography.apply(to: page) }
+    }
 
     // MARK: Local models
 
@@ -137,18 +166,18 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         localRuntimeRows.translatesAutoresizingMaskIntoConstraints = false
         runtimes.addSubview(localRuntimeRows)
         NSLayoutConstraint.activate([
-            localRuntimeRows.leadingAnchor.constraint(equalTo: runtimes.leadingAnchor, constant: 14),
-            localRuntimeRows.trailingAnchor.constraint(equalTo: runtimes.trailingAnchor, constant: -14),
+            localRuntimeRows.leadingAnchor.constraint(equalTo: runtimes.leadingAnchor, constant: 18),
+            localRuntimeRows.trailingAnchor.constraint(equalTo: runtimes.trailingAnchor, constant: -18),
             localRuntimeRows.topAnchor.constraint(equalTo: runtimes.topAnchor, constant: 2),
             localRuntimeRows.bottomAnchor.constraint(equalTo: runtimes.bottomAnchor, constant: -2)
         ])
         let heading = text("On this Mac")
         heading.font = Typography.interfaceEmphasis
-        let rescan = NSButton(title: "Look Again", target: self, action: #selector(rescanLocalModels))
+        let rescan = ThemedButton(title: "Look Again", target: self, action: #selector(rescanLocalModels))
         rescan.bezelStyle = .rounded; rescan.font = Typography.interface
         localScanStatus.font = Typography.caption; localScanStatus.textColor = FeedPalette.muted
         localScanStatus.lineBreakMode = .byTruncatingTail
-        let addServer = NSButton(title: "Add Server…", target: self, action: #selector(addLocalEndpoint))
+        let addServer = ThemedButton(title: "Add Server…", target: self, action: #selector(addLocalEndpoint))
         addServer.bezelStyle = .rounded; addServer.font = Typography.interface
         addServer.toolTip = "Add any OpenAI-compatible server by address, such as MLX or llama.cpp on this Mac or your network."
         localScanStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -163,7 +192,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         fallback.state = localModels.usesLocalModelsOffline ? .on : .off
         fallback.target = self; fallback.action = #selector(offlineFallbackChanged(_:))
         fallback.setAccessibilityLabel("Use local models when offline")
-        let context = NSPopUpButton()
+        let context = ThemedPopUpButton()
         for length in LocalModelRegistry.contextLengths {
             context.addItem(withTitle: "\(length / 1024)K tokens")
             context.lastItem?.representedObject = length
@@ -174,17 +203,17 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         context.setAccessibilityLabel("Conversation memory for Ollama models")
         let options = section("Behavior", rows: [
             row("Use local models when offline",
-                detail: "With no Internet, a new chat is answered by a model on this Mac, and a waiting message can be moved to one.",
+                detail: "Start new chats with a model on this Mac when you’re offline.",
                 controls: [fallback]),
             row("Conversation memory",
-                detail: "How much of a chat an Ollama model keeps in view. Larger uses more memory and is capped by each model.",
+                detail: "Context size for Ollama. Larger values use more memory.",
                 controls: [context])
         ])
         localObserver = NotificationCenter.default.addObserver(forName: .localModelsDidChange, object: localModels, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.reloadLocalRuntimes() }
         }
         reloadLocalRuntimes()
-        return page([found, options], note: "Choose Local Model in the main sidebar to chat with one. Downloaded Ollama and LM Studio models load when needed; scanning does not load them into memory. Local models can run commands, edit files, open apps and run AppleScript on this Mac, asking first unless full access is on. Any number of panes can use them at once.")
+        return page([found, options], note: "Choose Local Model in the sidebar to start a chat. Scanning won’t load models into memory. Local models follow your chat’s file and command permissions.")
     }
 
     private func reloadLocalRuntimes() {
@@ -201,12 +230,12 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
                 let names = status.models.map(\.name)
                 detail = names.isEmpty ? "Installed, not running. Starts automatically when needed."
                     : "Downloaded · loads when needed: " + names.prefix(6).joined(separator: ", ") + (names.count > 6 ? "…" : "")
-                let start = NSButton(title: "Start", target: self, action: #selector(startLocalRuntime(_:)))
+                let start = ThemedButton(title: "Start", target: self, action: #selector(startLocalRuntime(_:)))
                 start.bezelStyle = .rounded; start.font = Typography.interface; start.tag = index
                 controls = [start]
             } else if status.runtime.key.hasPrefix("custom:") {
                 detail = "Not answering at \(status.runtime.baseURL.absoluteString)."
-                let remove = NSButton(title: "Remove", target: self, action: #selector(removeLocalEndpoint(_:)))
+                let remove = ThemedButton(title: "Remove", target: self, action: #selector(removeLocalEndpoint(_:)))
                 remove.bezelStyle = .rounded; remove.font = Typography.interface; remove.tag = index
                 controls = [remove]
             } else {
@@ -217,8 +246,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             rows.append(row(status.runtime.name, detail: detail, controls: controls))
         }
         if rows.isEmpty {
-            rows.append(row(localModels.lastRefresh == nil ? "Looking for local models…" : "No local model runtime found",
-                            detail: "ThoughtStream scans Ollama and LM Studio model folders and checks local servers including Jan and llama.cpp. Download a model in a supported runtime, then choose Look Again.",
+            rows.append(row(localModels.lastRefresh == nil ? "Find a model on this Mac" : "No local models found",
+                            detail: "Download a model in Ollama or LM Studio, or connect a local server. Then choose Look Again.",
                             controls: []))
         }
         for (index, row) in rows.enumerated() {
@@ -230,6 +259,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             localRuntimeRows.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: localRuntimeRows.widthAnchor).isActive = true
         }
+        InterfaceTypography.apply(to: localRuntimeRows)
         let count = localModels.models.count
         localScanStatus.stringValue = localModels.lastRefresh == nil ? "" : count == 0 ? "No models available" : "\(count) model\(count == 1 ? "" : "s") available"
     }
@@ -294,34 +324,27 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         scanLocalModels()
     }
 
-    func setTabsOnly(_ enabled: Bool) {
-        paneLayoutSection?.isHidden = enabled
-        tabsOnlyNote?.isHidden = !enabled
-    }
-
     private func buildLayout(in panel: NSWindow) {
         let root = WorkspaceSurface()
+        root.fill = FeedPalette.canvas
         let content = NSViewController()
         content.view = root
         panel.contentViewController = content
-        // Page fitting sizes must not shrink the root when categories change.
         if let guide = panel.contentLayoutGuide as? NSLayoutGuide {
             root.widthAnchor.constraint(equalTo: guide.widthAnchor).isActive = true
         }
-        let sidebar = NSVisualEffectView()
-        sidebar.material = .sidebar
-        sidebar.blendingMode = .withinWindow
-        sidebar.state = .active
+        let sidebar = WorkspaceSurface()
+        sidebar.fill = FeedPalette.sidebar
         let sidebarTitle = NSTextField(labelWithString: "Settings")
-        sidebarTitle.font = Typography.section
-        sidebarTitle.textColor = .secondaryLabelColor
+        sidebarTitle.font = Typography.pageTitle
+        sidebarTitle.textColor = FeedPalette.text
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("settings"))
         navigation.addTableColumn(column)
         navigation.headerView = nil
-        navigation.rowHeight = 36
+        navigation.rowHeight = 44
         navigation.intercellSpacing = NSSize(width: 0, height: 4)
-        navigation.style = .sourceList
+        navigation.style = .plain
         navigation.backgroundColor = .clear
         navigation.focusRingType = .default
         navigation.allowsEmptySelection = false
@@ -331,32 +354,34 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         let navigationScroll = NSScrollView()
         navigationScroll.drawsBackground = false
         navigationScroll.documentView = navigation
+        navigationScroll.hasVerticalScroller = true
+        navigationScroll.autohidesScrollers = true
 
         let appName = NSTextField(labelWithString: "ThoughtStream")
-        appName.font = Typography.section
+        appName.font = Typography.interfaceEmphasis
+        appName.textColor = FeedPalette.text
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
         let versionLabel = NSTextField(labelWithString: version.isEmpty ? "" : "Version \(version)")
-        versionLabel.font = Typography.metadata
-        versionLabel.textColor = .secondaryLabelColor
+        versionLabel.font = Typography.caption
+        versionLabel.textColor = FeedPalette.muted
         let footer = NSStackView(views: [appName, versionLabel])
         footer.orientation = .vertical
         footer.alignment = .leading
-        footer.spacing = 3
+        footer.spacing = 4
 
-        pageTitle.font = Typography.pageTitle
+        pageTitle.font = Typography.welcomeTitle
         pageTitle.textColor = FeedPalette.text
         pageTitle.setAccessibilityRole(.staticText)
-        let headerLine = NSBox()
-        headerLine.boxType = .separator
-        let sidebarLine = NSBox()
-        sidebarLine.boxType = .separator
+        pageSubtitle.font = Typography.interface
+        pageSubtitle.textColor = FeedPalette.muted
+        pageSubtitle.isSelectable = true
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.documentView = pageDocument
         pageDocument.translatesAutoresizingMaskIntoConstraints = false
 
-        for view in [sidebar, sidebarLine, pageTitle, headerLine, scrollView] {
+        for view in [sidebar, pageTitle, pageSubtitle, scrollView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(view)
         }
@@ -368,28 +393,24 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             sidebar.topAnchor.constraint(equalTo: root.topAnchor),
             sidebar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            sidebar.widthAnchor.constraint(equalToConstant: 184),
-            sidebarTitle.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 23),
-            sidebarTitle.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 20),
-            navigationScroll.topAnchor.constraint(equalTo: sidebarTitle.bottomAnchor, constant: 14),
-            navigationScroll.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 8),
-            navigationScroll.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -8),
-            navigationScroll.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -20),
-            footer.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 20),
+            sidebar.widthAnchor.constraint(equalToConstant: 204),
+            sidebarTitle.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 28),
+            sidebarTitle.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 22),
+            navigationScroll.topAnchor.constraint(equalTo: sidebarTitle.bottomAnchor, constant: 24),
+            navigationScroll.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 10),
+            navigationScroll.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -10),
+            navigationScroll.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -24),
+            footer.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 22),
             footer.trailingAnchor.constraint(lessThanOrEqualTo: sidebar.trailingAnchor, constant: -16),
-            footer.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -20),
-            sidebarLine.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
-            sidebarLine.topAnchor.constraint(equalTo: root.topAnchor),
-            sidebarLine.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            sidebarLine.widthAnchor.constraint(equalToConstant: 1),
-            pageTitle.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: 28),
-            pageTitle.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
-            headerLine.topAnchor.constraint(equalTo: pageTitle.bottomAnchor, constant: 18),
-            headerLine.heightAnchor.constraint(equalToConstant: 1),
-            headerLine.leadingAnchor.constraint(equalTo: sidebarLine.trailingAnchor),
-            headerLine.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: headerLine.bottomAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: sidebarLine.trailingAnchor),
+            footer.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -24),
+            pageTitle.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: 32),
+            pageTitle.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -32),
+            pageTitle.topAnchor.constraint(equalTo: root.topAnchor, constant: 28),
+            pageSubtitle.leadingAnchor.constraint(equalTo: pageTitle.leadingAnchor),
+            pageSubtitle.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -32),
+            pageSubtitle.topAnchor.constraint(equalTo: pageTitle.bottomAnchor, constant: 8),
+            scrollView.topAnchor.constraint(equalTo: pageSubtitle.bottomAnchor, constant: 24),
+            scrollView.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             pageDocument.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor)
@@ -398,29 +419,32 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     func numberOfRows(in tableView: NSTableView) -> Int { Page.allCases.count }
 
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        SettingsNavigationRowView()
+    }
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let page = Page.allCases[row]
-        let cell = NSTableCellView()
-        let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: page.symbol, accessibilityDescription: nil)
-        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+        let cell = SettingsNavigationCell()
+        let badge = SettingsCategoryIcon(symbol: page.symbol, tint: page.tint)
         let label = NSTextField(labelWithString: page.rawValue)
-        label.font = Typography.interface
-        cell.imageView = icon
+        label.font = Typography.interfaceEmphasis
+        label.textColor = FeedPalette.text
         cell.textField = label
-        for view in [icon, label] {
+        for view in [badge, label] {
             view.translatesAutoresizingMaskIntoConstraints = false
             cell.addSubview(view)
         }
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 9),
-            icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 18),
-            icon.heightAnchor.constraint(equalToConstant: 18),
-            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 9),
-            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+            badge.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 10),
+            badge.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            badge.widthAnchor.constraint(equalToConstant: 28),
+            badge.heightAnchor.constraint(equalToConstant: 28),
+            label.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 10),
+            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
             label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
         ])
+        InterfaceTypography.apply(to: cell)
         return cell
     }
 
@@ -434,14 +458,16 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         NSLayoutConstraint.deactivate(pageConstraints)
         pageDocument.subviews.forEach { $0.removeFromSuperview() }
         pageTitle.stringValue = page.rawValue
+        pageSubtitle.stringValue = page.subtitle
         if page == .localModels, scansLocalModelsWhenShown { scanLocalModels() }
         pageDocument.addSubview(content)
         pageConstraints = [
-            content.leadingAnchor.constraint(equalTo: pageDocument.leadingAnchor, constant: 28),
-            content.trailingAnchor.constraint(equalTo: pageDocument.trailingAnchor, constant: -28),
-            content.topAnchor.constraint(equalTo: pageDocument.topAnchor, constant: 24),
+            content.leadingAnchor.constraint(equalTo: pageDocument.leadingAnchor, constant: 32),
+            content.trailingAnchor.constraint(equalTo: pageDocument.trailingAnchor, constant: -32),
+            content.topAnchor.constraint(equalTo: pageDocument.topAnchor, constant: 0),
             content.bottomAnchor.constraint(equalTo: pageDocument.bottomAnchor, constant: -28)
         ]
+        InterfaceTypography.apply(to: content)
         NSLayoutConstraint.activate(pageConstraints)
         scrollView.contentView.scroll(to: .zero)
         scrollView.reflectScrolledClipView(scrollView.contentView)
@@ -452,7 +478,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         let stack = NSStackView(views: sections + [noteLabel])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 16
+        stack.spacing = 20
         stack.translatesAutoresizingMaskIntoConstraints = false
         for view in stack.arrangedSubviews { view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
         return stack
@@ -461,6 +487,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private func section(_ title: String, rows: [NSView]) -> NSView {
         let heading = text(title)
         heading.font = Typography.interfaceEmphasis
+        heading.textColor = FeedPalette.muted
         heading.setAccessibilityRole(.staticText)
         let card = SettingsGroupView()
         let contents = NSStackView()
@@ -481,8 +508,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         let host = card
         host.addSubview(contents)
         NSLayoutConstraint.activate([
-            contents.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 14),
-            contents.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -14),
+            contents.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 18),
+            contents.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -18),
             contents.topAnchor.constraint(equalTo: host.topAnchor, constant: 2),
             contents.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -2)
         ])
@@ -515,14 +542,14 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         row.orientation = .horizontal
         row.distribution = .fill
         row.alignment = .centerY
-        row.spacing = 20
-        row.edgeInsets = NSEdgeInsets(top: 14, left: 0, bottom: 14, right: 0)
+        row.spacing = 16
+        row.edgeInsets = NSEdgeInsets(top: 18, left: 0, bottom: 18, right: 0)
         labels.widthAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
         // Wrapping labels can grow after the stack's first fitting pass. Keep
         // the row padding tied to their actual height, not that initial estimate.
         NSLayoutConstraint.activate([
-            row.heightAnchor.constraint(greaterThanOrEqualTo: labels.heightAnchor, constant: 28),
-            row.heightAnchor.constraint(greaterThanOrEqualTo: controlStack.heightAnchor, constant: 28)
+            row.heightAnchor.constraint(greaterThanOrEqualTo: labels.heightAnchor, constant: 36),
+            row.heightAnchor.constraint(greaterThanOrEqualTo: controlStack.heightAnchor, constant: 36)
         ])
         return row
     }
@@ -540,11 +567,64 @@ private final class FlippedSettingsView: NSView {
     override var isFlipped: Bool { true }
 }
 
+private final class SettingsNavigationCell: NSTableCellView {
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet { textField?.textColor = FeedPalette.text }
+    }
+}
+
+private final class SettingsNavigationRowView: NSTableRowView {
+    override func drawSelection(in dirtyRect: NSRect) {
+        FeedPalette.selection.setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: 8, yRadius: 8).fill()
+    }
+
+    override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
+}
+
+private final class SettingsCategoryIcon: NSView {
+    private let tint: NSColor
+
+    init(symbol: String, tint: NSColor) {
+        self.tint = tint
+        super.init(frame: .zero)
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
+        icon.contentTintColor = tint
+        icon.setAccessibilityElement(false)
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(icon)
+        NSLayoutConstraint.activate([
+            icon.centerXAnchor.constraint(equalTo: centerXAnchor),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 18),
+            icon.heightAnchor.constraint(equalToConstant: 18)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        tint.withAlphaComponent(0.12).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 7, yRadius: 7).fill()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+}
+
 private final class SettingsGroupView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        FeedPalette.surface.setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: 10, yRadius: 10).fill()
+        let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 10, yRadius: 10)
+        FeedPalette.canvas.setFill()
+        shape.fill()
+        FeedPalette.line.setStroke()
+        shape.lineWidth = 1
+        shape.stroke()
     }
 
     override func viewDidChangeEffectiveAppearance() {

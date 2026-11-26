@@ -11,6 +11,7 @@ struct FeedHighlight: Sendable {
     var commandText: String? = nil
     var freshCode = false
     var createdOutput = false
+    var contentOrigin = FeedContentOrigin.context
     // A reasoning object gets a bounded pause from its first appearance.
     var readingPause: TimeInterval? = nil
     var id: String { "\(record):\(kind):\(occurrence):\(kind == "Heading" ? needle ?? "" : "")" }
@@ -19,6 +20,15 @@ struct FeedHighlight: Sendable {
 enum FeedHighlightIndex {
     /// Read only enough text for labels. Never format or lay out the full feed here.
     static func entries(for record: StreamRecord, at index: Int) -> [FeedHighlight] {
+        let origin = FeedContentOrigin(record: record)
+        return indexedEntries(for: record, at: index).map { entry in
+            var entry = entry
+            entry.contentOrigin = origin
+            return entry
+        }
+    }
+
+    private static func indexedEntries(for record: StreamRecord, at index: Int) -> [FeedHighlight] {
         if isProtocolChatter(record) { return [] }
         let prefix = String(record.text.prefix(2048))
         let trimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -154,18 +164,10 @@ final class FeedHighlightsView: NSView, NSTableViewDataSource, NSTableViewDelega
     private var followsLatest = true
     private var clockTimer: Timer?
     var onJump: ((FeedHighlight) -> Void)?
-    var onLatest: (() -> Void)?
     override init(frame: NSRect) {
         super.init(frame: frame)
         let title = NSTextField(labelWithString: "Overview")
         title.font = Typography.section; title.textColor = FeedPalette.muted
-        let latest = NSButton(title: "", target: self, action: #selector(jumpLatest))
-        latest.image = NSImage(systemSymbolName: "arrow.down.to.line", accessibilityDescription: nil)
-        latest.imagePosition = .imageOnly
-        latest.isBordered = false
-        latest.contentTintColor = FeedPalette.muted
-        latest.setAccessibilityLabel("Go to bottom")
-        latest.toolTip = "Go to the latest item"
         let header = NSStackView(views: [title, NSView()]); header.orientation = .horizontal; header.spacing = 4
         table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("highlight")))
         table.headerView = nil; table.rowHeight = 66; table.style = .plain
@@ -175,11 +177,13 @@ final class FeedHighlightsView: NSView, NSTableViewDataSource, NSTableViewDelega
         table.setAccessibilityLabel("Overview: reasoning, created code and output highlighted, followed chronologically with supporting activity")
         scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true; scroll.drawsBackground = false
         scroll.scrollerStyle = .overlay
-        for child in [header, scroll, latest] { child.translatesAutoresizingMaskIntoConstraints = false; addSubview(child) }
+        scroll.contentView.wantsLayer = true
+        scroll.contentView.layer?.cornerRadius = FeedOverviewRow.cornerRadius
+        scroll.contentView.layer?.masksToBounds = true
+        for child in [header, scroll] { child.translatesAutoresizingMaskIntoConstraints = false; addSubview(child) }
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: leadingAnchor, constant: PaneSpacing.textInset + 8), header.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -PaneSpacing.textInset), header.topAnchor.constraint(equalTo: topAnchor, constant: 8), header.heightAnchor.constraint(equalToConstant: 22),
-            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: PaneSpacing.gap), scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: PaneSpacing.textInset), scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -PaneSpacing.textInset), scroll.bottomAnchor.constraint(equalTo: latest.topAnchor, constant: -PaneSpacing.gap),
-            latest.leadingAnchor.constraint(equalTo: leadingAnchor, constant: PaneSpacing.textInset), latest.widthAnchor.constraint(equalToConstant: 30), latest.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -PaneSpacing.textInset), latest.heightAnchor.constraint(equalToConstant: 30)
+            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: PaneSpacing.gap), scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: PaneSpacing.textInset), scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -PaneSpacing.textInset), scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -PaneSpacing.textInset)
         ])
     }
     required init?(coder: NSCoder) { fatalError("Not implemented") }
@@ -298,14 +302,13 @@ final class FeedHighlightsView: NSView, NSTableViewDataSource, NSTableViewDelega
         followsLatest = false
         let entry = entries[table.selectedRow]; selectedID = entry.id; onJump?(entry)
     }
-    @objc private func jumpLatest() { onLatest?() }
 }
 
 @MainActor
 final class FeedTypeBadge: NSView {
     private let ink: NSColor
     init(kind: String, prominent: Bool = true) {
-        ink = !prominent ? FeedPalette.muted : ["New code", "Created code", "Created output", "File changes"].contains(kind) ? FeedPalette.green : kind == "Reasoning" ? FeedPalette.purple : kind == "Error" ? FeedPalette.red : ["JSON", "HTML", "Code", "Python"].contains(kind) ? FeedPalette.blue : FeedPalette.muted
+        ink = !prominent ? FeedPalette.muted : ["New code", "Created code", "Generated code", "Created output", "File changes", "Project changes"].contains(kind) ? FeedPalette.green : kind == "Reasoning" ? FeedPalette.purple : kind == "Error" ? FeedPalette.red : ["JSON", "HTML", "Code", "Python"].contains(kind) ? FeedPalette.blue : FeedPalette.muted
         super.init(frame: .zero)
         let title = NSTextField(labelWithString: kind == "You" ? "Prompt" : kind == "Command" ? "Shell" : kind)
         title.font = Typography.badge; title.textColor = ink

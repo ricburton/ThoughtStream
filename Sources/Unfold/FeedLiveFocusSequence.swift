@@ -44,6 +44,9 @@ struct FeedLiveFocusSequence {
             index = first
         } else if !showedCode, let first = pending.firstIndex(where: { $0.highlight.freshCode }) {
             index = first
+        } else if let first = pending.firstIndex(where: { $0.highlight.prominence != .activity }) {
+            // Keep new work, answers and errors ahead of queued response data.
+            index = first
         } else { index = 0 }
         let object = pending.remove(at: index)
         showedReasoning = showedReasoning || object.highlight.kind == "Reasoning"

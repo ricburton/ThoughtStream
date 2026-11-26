@@ -32,9 +32,9 @@ final class ChatModelSelectionTests: XCTestCase {
         XCTAssertEqual(workspace.chosenSettings, sol)
         panes[0].onFocus?()
         XCTAssertEqual(workspace.chosenSettings, astra)
-        panes[0].onSelectChat?(1)
+        workspace.select(1, in: panes[0])
         XCTAssertEqual(workspace.chosenSettings, sol)
-        panes[0].onSelectChat?(0)
+        workspace.select(0, in: panes[0])
         XCTAssertEqual(workspace.chosenSettings, astra)
 
         // A late model-list response from another chat must preserve this chat.
@@ -49,8 +49,8 @@ final class ChatModelSelectionTests: XCTestCase {
         picker.selectItem(at: 0)
         XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(picker.action), to: picker.target, from: picker))
         XCTAssertEqual(first.inferenceSettings.model, sol.model)
-        panes[0].onSelectChat?(1)
-        panes[0].onSelectChat?(0)
+        workspace.select(1, in: panes[0])
+        workspace.select(0, in: panes[0])
         XCTAssertEqual(workspace.chosenSettings.model, sol.model)
         XCTAssertEqual(second.inferenceSettings, sol)
         let restored = Session(project: root, id: first.id, storageRoot: root)

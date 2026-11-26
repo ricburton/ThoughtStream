@@ -29,11 +29,18 @@ indirect enum PaneLayout: Codable, Equatable {
     /// The floor on a cramped display: the pane's chrome and text go compact.
     static let compactPaneSize = NSSize(width: 170, height: 260)
     /// Lanes share the visible area up to these counts, then the pane area scrolls.
-    static let visibleColumnsBeforeScrolling = 10
+    static let visibleColumnsBeforeScrolling = 5
     static let visibleRowsBeforeScrolling = 5
 
+    /// Fit five columns in the current pane viewport, including dividers and insets.
+    static func rebalancedColumnWidth(viewport: NSSize, paneInset: CGFloat = 0) -> CGFloat {
+        guard viewport.width.isFinite, viewport.width > 0 else { return 0 }
+        let columns = CGFloat(visibleColumnsBeforeScrolling)
+        return max(0, (viewport.width - (columns - 1)) / columns - 2 * paneInset)
+    }
+
     /// The smallest pane for a visible pane area. A big display gives every
-    /// lane a tenth of its width (a fifth of its height); a cramped one stops
+    /// lane a fifth of its width and height; a cramped one stops
     /// at the compact floor and scrolls sooner. There is no cap on pane count.
     static func adaptiveMinimum(viewport: NSSize, paneInset: CGFloat = 0, divider: CGFloat = 1) -> NSSize {
         func share(_ extent: CGFloat, _ lanes: Int, _ floor: CGFloat) -> CGFloat {
@@ -81,6 +88,47 @@ indirect enum PaneLayout: Codable, Equatable {
         case .split(_, _, let first, let second): return first.ids + second.ids
         }
     }
+    /// Older workspaces saved long rows as a chain of nested split views.
+    /// Regroup only deep trees, carrying each lane's size across the dividers.
+    func shorteningDeepSplits(canvasSize: NSSize?) -> PaneLayout {
+        func exceedsDepth(_ node: PaneLayout, remaining: Int) -> Bool {
+            guard case let .split(_, _, first, second) = node else { return false }
+            return remaining == 0 || exceedsDepth(first, remaining: remaining - 1)
+                || exceedsDepth(second, remaining: remaining - 1)
+        }
+        guard exceedsDepth(self, remaining: 12) else { return self }
+        let minimum = minimumSize
+        let size = NSSize(width: max(minimum.width, canvasSize?.width ?? 0),
+                          height: max(minimum.height, canvasSize?.height ?? 0))
+        func rebuild(_ node: PaneLayout, size: NSSize) -> PaneLayout {
+            guard case let .split(vertical, _, _, _) = node else { return node }
+            var lanes: [(layout: PaneLayout, extent: CGFloat)] = []
+            func collect(_ part: PaneLayout, extent: CGFloat) {
+                if case let .split(axis, fraction, first, second) = part, axis == vertical {
+                    let content = max(0, extent - 1)
+                    let share = fraction.isFinite ? min(1, max(0, fraction)) : 0.5
+                    collect(first, extent: content * share)
+                    collect(second, extent: content * (1 - share))
+                } else {
+                    let laneSize = vertical ? NSSize(width: extent, height: size.height)
+                                            : NSSize(width: size.width, height: extent)
+                    lanes.append((rebuild(part, size: laneSize), extent))
+                }
+            }
+            collect(node, extent: vertical ? size.width : size.height)
+            func join(_ range: Range<Int>) -> (layout: PaneLayout, extent: CGFloat) {
+                if range.count == 1 { return lanes[range.lowerBound] }
+                let middle = range.lowerBound + range.count / 2
+                let left = join(range.lowerBound..<middle), right = join(middle..<range.upperBound)
+                let content = left.extent + right.extent
+                return (.split(vertical: vertical, fraction: content > 0 ? left.extent / content : 0.5,
+                               first: left.layout, second: right.layout), content + 1)
+            }
+            return join(lanes.indices).layout
+        }
+        return rebuild(self, size: size)
+    }
+
     func replacing(_ id: UUID, with replacement: PaneLayout) -> PaneLayout {
         switch self {
         case .pane(let value): return value == id ? replacement : self
@@ -170,10 +218,10 @@ enum PaneArrangement: String, CaseIterable {
     }
 }
 
-enum WorkspaceLayoutMode: String, Codable, CaseIterable {
+/// Accepted only when reading pre-region workspace snapshots.
+enum WorkspaceLayoutMode: String, Codable {
     case tabs, panes
 
-    var title: String { self == .tabs ? "Tabs Only" : "Panes" }
 }
 
 struct TabbedViewState: Codable {
@@ -185,7 +233,12 @@ struct TabbedViewState: Codable {
 }
 
 struct ProjectViewState: Codable {
+    /// Current format. Legacy tabs below are read only when migrating a workspace.
+    var regions: [ChatRegionState]?
     var layout: PaneLayout?
+    /// Present after manual resizing, even when no extra canvas space was needed.
+    var paneCanvasSize: NSSize?
+    var compactColumnSizing: Bool?
     var panes: [PaneViewState]?
     var focusedPane: UUID?
     var primary: UUID?
@@ -200,24 +253,118 @@ struct ProjectViewState: Codable {
     var historyExpanded: Bool?
     var tabbed: TabbedViewState?
 
-    /// Seed the new view once, preserving order and the focused conversation.
-    /// Subsequent visits use its own tabs without changing the saved pane layout.
-    func tabbedState(fallbackTabs: [UUID]) -> TabbedViewState {
-        if let tabbed { return tabbed }
-        let orderedPanes = layout?.ids.compactMap { id in panes?.first { $0.id == id } } ?? panes ?? []
-        let focused = orderedPanes.first { $0.id == focusedPane } ?? orderedPanes.first
-        let candidates = orderedPanes.isEmpty
-            ? (primaryTabs ?? fallbackTabs) + (secondaryTabs ?? [])
-            : orderedPanes.flatMap(\.tabs)
+
+}
+
+struct ChatRegionState: Codable {
+    var id: UUID
+    var session: UUID?
+    var stream: StreamViewState?
+}
+
+struct ChatRegionLayout {
+    var layout: PaneLayout?
+    var regions: [ChatRegionState]
+    var focused: UUID?
+}
+
+extension ProjectViewState {
+    /// Expand old tab groups in place, preserving split geometry and the selected
+    /// chat's region identity. A conversation can occur only once in the result.
+    func chatRegionLayout(validIDs: Set<UUID>, fallbackIDs: [UUID], preferTabbed: Bool = false) -> ChatRegionLayout {
+        var result: [ChatRegionState] = []
         var seen = Set<UUID>()
-        let tabs = candidates.filter { seen.insert($0).inserted }
-        let selected = focused?.session ?? (focusedSecondary ? secondary : primary)
-        var streams: [UUID: StreamViewState] = [:]
-        for pane in orderedPanes { streams.merge(pane.streams ?? [:]) { first, _ in first } }
-        streams.merge(focused?.streams ?? [:]) { _, focused in focused }
-        return TabbedViewState(selectedChat: selected.flatMap { tabs.contains($0) ? $0 : nil } ?? tabs.first,
-                               tabs: tabs, streams: streams,
-                               closedTabs: orderedPanes.flatMap { $0.closedTabs ?? [] })
+        var tree: PaneLayout?
+        var focus = focusedPane
+        var owners: [UUID: UUID] = [:]
+        for pane in panes ?? [] {
+            if let chat = pane.session, owners[chat] == nil || pane.id == focusedPane { owners[chat] = pane.id }
+        }
+        func append(_ region: ChatRegionState) -> PaneLayout? {
+            guard let session = region.session, validIDs.contains(session), seen.insert(session).inserted else { return nil }
+            result.append(region)
+            return .pane(region.id)
+        }
+        func join(_ first: PaneLayout?, _ second: PaneLayout?, vertical: Bool = true, fraction: Double? = nil) -> PaneLayout? {
+            guard let first else { return second }
+            guard let second else { return first }
+            let firstCount = vertical ? first.dimensions.columns : first.dimensions.rows
+            let secondCount = vertical ? second.dimensions.columns : second.dimensions.rows
+            let share = fraction ?? Double(firstCount) / Double(firstCount + secondCount)
+            return .split(vertical: vertical, fraction: share, first: first, second: second)
+        }
+        /// Keep a large migrated tab group shallow. Left-folding hundreds of
+        /// legacy tabs creates a hundreds-deep AppKit view/controller tree;
+        /// AppKit then recursively resolves constraints until launch stalls.
+        func balancedJoin(_ layouts: [PaneLayout], vertical: Bool = true) -> PaneLayout? {
+            func build(_ range: Range<Int>) -> PaneLayout? {
+                guard !range.isEmpty else { return nil }
+                guard range.count > 1 else { return layouts[range.lowerBound] }
+                let middle = range.lowerBound + range.count / 2
+                return join(build(range.lowerBound..<middle), build(middle..<range.upperBound), vertical: vertical)
+            }
+            return build(layouts.indices)
+        }
+        func visit(_ node: PaneLayout) -> PaneLayout? {
+            switch node {
+            case .split(let vertical, let fraction, let first, let second):
+                return join(visit(first), visit(second), vertical: vertical, fraction: fraction)
+            case .pane(let id):
+                if let regions { return regions.first { $0.id == id }.flatMap(append) }
+                guard let old = panes?.first(where: { $0.id == id }) else { return nil }
+                let ids = old.tabs + (old.session.map { [$0] } ?? [])
+                var branch: [PaneLayout] = []
+                for chat in ids {
+                    if let owner = owners[chat], owner != id { continue }
+                    let regionID = chat == old.session ? id : UUID()
+                    if let region = append(ChatRegionState(id: regionID, session: chat, stream: old.streams?[chat])) {
+                        branch.append(region)
+                    }
+                }
+                return balancedJoin(branch)
+            }
+        }
+        if regions != nil, let layout {
+            tree = visit(layout.shorteningDeepSplits(canvasSize: paneCanvasSize))
+        } else if preferTabbed, let tabbed {
+            var tabLayouts: [PaneLayout] = []
+            for chat in tabbed.tabs {
+                let id = UUID()
+                if let region = append(ChatRegionState(id: id, session: chat, stream: tabbed.streams[chat])) {
+                    tabLayouts.append(region)
+                }
+                if chat == tabbed.selectedChat { focus = id }
+            }
+            tree = balancedJoin(tabLayouts)
+        } else if let layout, panes != nil {
+            tree = visit(layout.shorteningDeepSplits(canvasSize: paneCanvasSize))
+        } else if let regions {
+            var regionLayouts: [PaneLayout] = []
+            for region in regions {
+                if let layout = append(region) { regionLayouts.append(layout) }
+            }
+            tree = balancedJoin(regionLayouts)
+        } else {
+            func group(_ selected: UUID?, _ candidates: [UUID]) -> PaneLayout? {
+                var branch: [PaneLayout] = []
+                for chat in (selected.map { [$0] } ?? []) + candidates {
+                    let id = UUID()
+                    if let region = append(ChatRegionState(id: id, session: chat)) { branch.append(region) }
+                    if chat == (focusedSecondary ? secondary : primary), result.last?.id == id { focus = id }
+                }
+                return balancedJoin(branch)
+            }
+            let left = group(primary, (primaryTabs ?? tabs ?? fallbackIDs).filter { $0 != secondary || $0 == primary })
+            let right = group(secondary, secondaryTabs ?? [])
+            tree = join(left, right, fraction: splitFraction)
+        }
+        if result.isEmpty {
+            let id = regions?.first?.id ?? UUID()
+            result = [ChatRegionState(id: id, session: nil)]
+            tree = .pane(id)
+        }
+        if !result.contains(where: { $0.id == focus }) { focus = result.first?.id }
+        return ChatRegionLayout(layout: tree, regions: result, focused: focus)
     }
 }
 

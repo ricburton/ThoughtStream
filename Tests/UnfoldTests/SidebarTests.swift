@@ -4,7 +4,7 @@ import XCTest
 
 final class SidebarTests: XCTestCase {
     @MainActor
-    func testProjectsFollowWorkingChatsThenRecentConversationActivity() throws {
+    func testProjectsFollowRecentConversationActivityRegardlessOfRunningState() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = WorkspaceStateStore(url: root.appendingPathComponent("workspace.json"))
         func chat(_ name: String, time: TimeInterval?) -> Session {
@@ -22,21 +22,21 @@ final class SidebarTests: XCTestCase {
         func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
         let content = try XCTUnwrap(workspace.window?.contentView)
         let table = try XCTUnwrap(descendants(content).compactMap { $0 as? NSTableView }
-            .first { $0.accessibilityLabel() == "Folders" })
+            .first { $0.accessibilityLabel() == "Projects" })
         func names() -> [String] {
             (0..<table.numberOfRows).compactMap {
                 (workspace.tableView(table, viewFor: nil, row: $0) as? SidebarProjectCell)?.textField?.stringValue
             }
         }
-        XCTAssertEqual(names(), ["Working", "Newest", "Older", "Empty"])
+        XCTAssertEqual(names(), ["Newest", "Working", "Older", "Empty"])
         workspace.selectProject(working.project.path)
         workspace.selectProject(newest.project.path)
         older.report(.system, "Connected again")
         older.onStatus?("Ready")
-        XCTAssertEqual(names(), ["Working", "Newest", "Older", "Empty"], "Connection bookkeeping must not reorder projects")
+        XCTAssertEqual(names(), ["Newest", "Working", "Older", "Empty"], "Connection bookkeeping must not reorder projects")
         older.report(.user, "Working on this project again")
         older.onStatus?("Ready")
-        XCTAssertEqual(names(), ["Working", "Older", "Newest", "Empty"])
+        XCTAssertEqual(names(), ["Older", "Newest", "Working", "Empty"])
         XCTAssertEqual((workspace.tableView(table, viewFor: nil, row: table.selectedRow) as? SidebarProjectCell)?.textField?.stringValue, "Newest")
         working.turn = nil
         working.onStatus?("Ready")
@@ -60,8 +60,8 @@ final class SidebarTests: XCTestCase {
         let content = try XCTUnwrap(window.contentView)
         func descend(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descend) }
         let tables = descend(content).compactMap { $0 as? NSTableView }
-        let live = try XCTUnwrap(tables.first { $0.accessibilityLabel() == "Live conversations" })
-        let projects = try XCTUnwrap(tables.first { $0.accessibilityLabel() == "Folders" })
+        let live = try XCTUnwrap(tables.first { $0.accessibilityLabel() == "Chats" })
+        let projects = try XCTUnwrap(tables.first { $0.accessibilityLabel() == "Projects" })
         XCTAssertEqual(live.numberOfRows, 2)
         XCTAssertEqual(projects.numberOfRows, 2)
         let first = try XCTUnwrap(workspace.tableView(live, viewFor: nil, row: 0) as? SidebarConversationCell)
@@ -83,7 +83,9 @@ final class SidebarTests: XCTestCase {
         let projectsRect = try XCTUnwrap(projects.enclosingScrollView).convert(projects.enclosingScrollView!.bounds, to: content)
         XCTAssertGreaterThanOrEqual(liveRect.minY, projectsRect.maxY)
         XCTAssertGreaterThanOrEqual(liveRect.height, 80)
-        XCTAssertGreaterThan(projectsRect.minY, 80)
+        let modelsTitle = try XCTUnwrap(descend(content).compactMap { $0 as? NSTextField }.first { $0.stringValue == "Models" })
+        let modelsRect = modelsTitle.convert(modelsTitle.bounds, to: content)
+        XCTAssertGreaterThanOrEqual(projectsRect.minY, modelsRect.maxY)
         live.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
         XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(live.action), to: live.target, from: live))
         XCTAssertEqual(window.title, "Build the app")
@@ -97,13 +99,13 @@ final class SidebarTests: XCTestCase {
         working.onStatus?("Ready")
         let newOrder = ["New conversation"] + originalOrder
         XCTAssertEqual(titles(workspace, live), newOrder)
-        XCTAssertEqual(live.selectedRow, 2, "Selection follows the chat when a new chat appears")
+        XCTAssertEqual(live.selectedRow, 2, "Starting a draft adds it above existing chats without changing selection")
         workspace.stopAll()
         let restored = WorkspaceWindow(restoredSessions: [working, planning, draft], stateStore: store)
         defer { restored.stopAll(); restored.window?.close() }
         let restoredContent = try XCTUnwrap(restored.window?.contentView)
         let restoredLive = try XCTUnwrap(descend(restoredContent).compactMap { $0 as? NSTableView }
-            .first { $0.accessibilityLabel() == "Live conversations" })
+            .first { $0.accessibilityLabel() == "Chats" })
         XCTAssertEqual(titles(restored, restoredLive), newOrder)
     }
 
@@ -119,7 +121,7 @@ final class SidebarTests: XCTestCase {
         window.contentView?.layoutSubtreeIfNeeded()
         let content = try XCTUnwrap(window.contentView)
         func descend(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descend) }
-        let live = try XCTUnwrap(descend(content).compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel() == "Live conversations" })
+        let live = try XCTUnwrap(descend(content).compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel() == "Chats" })
         let scroll = try XCTUnwrap(live.enclosingScrollView)
         XCTAssertGreaterThanOrEqual(scroll.bounds.height, 80)
         XCTAssertLessThanOrEqual(scroll.convert(scroll.bounds, to: content).maxY, content.bounds.maxY)
@@ -138,9 +140,19 @@ final class SidebarTests: XCTestCase {
         for height: CGFloat in [800, 600] {
             window.setContentSize(NSSize(width: 1120, height: height))
             content.layoutSubtreeIfNeeded()
-            XCTAssertEqual(split.subviews[0].frame.height / (split.bounds.height - split.dividerThickness), 2.0 / 3.0, accuracy: 0.01)
+            let available = split.bounds.height - split.dividerThickness
+            XCTAssertEqual(split.subviews[0].frame.height, min(available * 2.0 / 3.0, available - SidebarSplitView.projectMinimum), accuracy: 1)
+            XCTAssertGreaterThanOrEqual(split.subviews[1].frame.height, SidebarSplitView.projectMinimum)
+            XCTAssertGreaterThanOrEqual(split.subviews[0].frame.height, 160)
         }
+        // Choose the divider position where both sections have room, then
+        // preserve it while a compact window temporarily clamps the layout.
+        window.setContentSize(NSSize(width: 1120, height: 800))
+        content.layoutSubtreeIfNeeded()
         split.setPosition((split.bounds.height - split.dividerThickness) * 0.45, ofDividerAt: 0)
+        XCTAssertEqual(split.chatFraction, 0.45, accuracy: 0.01)
+        window.setContentSize(NSSize(width: 1120, height: 600))
+        content.layoutSubtreeIfNeeded()
         XCTAssertEqual(split.chatFraction, 0.45, accuracy: 0.01)
         window.setContentSize(NSSize(width: 1120, height: 800))
         content.layoutSubtreeIfNeeded()

@@ -16,8 +16,8 @@ final class ToolCallResultTests: XCTestCase {
     func testCompletedToolCallRendersResultAsPlainText() throws {
         var renderer = NativeFeedRenderer(size: 16, analyses: [:])
         let blocks = renderer.render(StreamRecord(kind: "Tool", text: item, language: nil))
-        XCTAssertFalse(blocks.contains { if case .code = $0 { return true }; return false })
-        let text = blocks.compactMap { if case .text(let value) = $0 { return value.string }; return nil }.joined(separator: "\n")
+        XCTAssertFalse(blocks.contains { if case .code(_, _, let label) = $0 { return label == "JSON" }; return false })
+        let text = blocks.compactMap { if case .code(let value, _, _) = $0 { return value.string }; return nil }.joined(separator: "\n")
         XCTAssertTrue(text.hasPrefix("WebFetch"))
         XCTAssertTrue(text.contains("Members: Finn Milburn"))
         XCTAssertFalse(text.contains("toolu_01"))

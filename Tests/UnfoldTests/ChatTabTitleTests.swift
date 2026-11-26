@@ -32,16 +32,16 @@ final class ChatTabTitleTests: XCTestCase {
         let session = Session(project: root, title: "Codex · Fix scrolling", storageRoot: root)
         session.turn = "running"
         let column = ChatColumn()
-        column.updateTabs([(0, session)], isSplit: false)
+        column.display(session)
         func buttons(in view: NSView) -> [NSButton] {
             (view as? NSButton).map { [$0] } ?? view.subviews.flatMap { buttons(in: $0) }
         }
         let allButtons = buttons(in: column.view)
-        let tab = try XCTUnwrap(allButtons.first { $0 is ChatTabButton })
+        let tab = try XCTUnwrap(allButtons.first { $0 is ChatTitleButton })
         XCTAssertEqual(tab.title, "Fix scrolling")
-        XCTAssertTrue((tab as? ChatTabButton)?.isRunning == true)
-        XCTAssertEqual(tab.toolTip, "Fix scrolling — drag to a pane edge to split")
-        XCTAssertTrue(allButtons.contains { $0.toolTip == "Close Fix scrolling" })
+        XCTAssertTrue((tab as? ChatTitleButton)?.isRunning == true)
+        XCTAssertTrue(tab.toolTip?.hasPrefix("Fix scrolling") == true)
+        XCTAssertNotNil(tab.menu?.item(withTitle: "Close Chat"))
         XCTAssertEqual(session.title, "Codex · Fix scrolling")
         session.stop()
     }

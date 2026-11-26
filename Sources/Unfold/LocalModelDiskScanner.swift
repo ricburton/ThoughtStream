@@ -13,32 +13,99 @@ enum LocalModelDiskScanner {
             let configured = environment["OLLAMA_MODELS"].flatMap { $0.isEmpty ? nil : $0 }
             let root = configured.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
                 ?? home.appendingPathComponent(".ollama/models")
-            return ollamaModels(root: root, runtime: runtime)
+            guard !isProtectedLocation(root, home: home) else { return [] }
+            return ollamaModels(root: root, runtime: runtime, home: home)
         case "lmstudio":
             var seen = Set<String>()
             var roots = [".lmstudio/models", ".cache/lm-studio/models"].map { home.appendingPathComponent($0) }
-            // LM Studio persists a custom model store here, including folders
-            // shared with other local model apps. Read only this setting.
+            // LM Studio persists a custom model store here. Never inspect another
+            // app's container or TCC-protected Library folder, which triggers
+            // macOS's "would like to access data from other apps" privacy prompt.
             if let settings = json(home.appendingPathComponent(".lmstudio/settings.json")),
                let path = settings["downloadsFolder"] as? String, path.hasPrefix("/"),
                path != "/", path != home.path {
                 roots.insert(URL(fileURLWithPath: path), at: 0)
             }
-            return roots.flatMap { studioModels(root: $0, runtime: runtime) }
+            return roots.filter { !isProtectedLocation($0, home: home) }
+                .flatMap { studioModels(root: $0, runtime: runtime, home: home) }
                 .filter { seen.insert($0.identifier).inserted }
         default: return []
         }
     }
 
-    private static func children(_ directory: URL, directories: Bool) -> [URL] {
+    /// Rejects other apps' containers and TCC-protected Library locations purely
+    /// lexically (and for direct symlink targets without traversing them) so
+    /// model discovery never triggers macOS cross-app data permission prompts.
+    static func isProtectedAppDataPath(_ url: URL, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
+        let candidate = canonicalLexicalPath(url).lowercased()
+        let homeBases = Set([canonicalLexicalPath(home), canonicalLexicalPath(home.resolvingSymlinksInPath())].map { $0.lowercased() })
+        let protectedSubpaths = [
+            "library/containers",
+            "library/group containers",
+            "library/daemon containers",
+            "library/accounts",
+            "library/calendars",
+            "library/cookies",
+            "library/mail",
+            "library/messages",
+            "library/safari",
+            "library/suggestions",
+            "library/cloudstorage",
+            "library/mobile documents",
+            "library/application support"
+        ]
+        let ownAppSupportSubpaths = [
+            "library/application support/thoughtstream",
+            "library/application support/unfoldnative"
+        ]
+        for base in homeBases {
+            if ownAppSupportSubpaths.contains(where: { isSameOrDescendant(candidate, of: base + "/" + $0) }) {
+                return false
+            }
+            if protectedSubpaths.contains(where: { isSameOrDescendant(candidate, of: base + "/" + $0) }) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func isProtectedLocation(_ url: URL, home: URL) -> Bool {
+        if isProtectedAppDataPath(url, home: home) { return true }
+        // Inspect symlink targets lexically without touching the destination.
+        var current = url
+        for _ in 0..<8 {
+            guard let target = try? FileManager.default.destinationOfSymbolicLink(atPath: current.path) else { break }
+            let next = target.hasPrefix("/")
+                ? URL(fileURLWithPath: target)
+                : current.deletingLastPathComponent().appendingPathComponent(target)
+            if isProtectedAppDataPath(next, home: home) { return true }
+            current = next
+        }
+        return false
+    }
+
+    private static func canonicalLexicalPath(_ url: URL) -> String {
+        var path = url.standardizedFileURL.path
+        while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
+        return path
+    }
+
+    private static func isSameOrDescendant(_ path: String, of prefix: String) -> Bool {
+        path == prefix || path.hasPrefix(prefix + "/")
+    }
+
+    private static func children(_ directory: URL, directories: Bool, home: URL) -> [URL] {
+        guard !isProtectedLocation(directory, home: home) else { return [] }
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
         let entries = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: Array(keys),
                                                                    options: [.skipsHiddenFiles])) ?? []
         return entries.prefix(10_000).filter {
             guard let values = try? $0.resourceValues(forKeys: keys) else { return false }
-            // Do not traverse directory links into unrelated folders.
-            return directories ? values.isDirectory == true && values.isSymbolicLink != true
-                : values.isRegularFile == true || values.isSymbolicLink == true
+            // Do not traverse directory links into unrelated folders, and never
+            // follow file links into another app's protected container.
+            if directories { return values.isDirectory == true && values.isSymbolicLink != true }
+            if values.isSymbolicLink == true && isProtectedLocation($0, home: home) { return false }
+            return values.isRegularFile == true || values.isSymbolicLink == true
         }.sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
@@ -50,15 +117,17 @@ enum LocalModelDiskScanner {
         return value
     }
 
-    static func ollamaModels(root: URL, runtime: LocalRuntime = .ollama) -> [LocalModel] {
+    static func ollamaModels(root: URL, runtime: LocalRuntime = .ollama,
+                             home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [LocalModel] {
+        guard !isProtectedLocation(root, home: home) else { return [] }
         var result: [LocalModel] = [], seen = Set<String>()
         // New stores may keep manifest symlinks in manifests-v2 and legacy
         // entries in manifests. Both layouts use host/namespace/model/tag.
         for layout in ["manifests-v2", "manifests"] {
-            for host in children(root.appendingPathComponent(layout), directories: true) {
-                for namespace in children(host, directories: true) {
-                    for model in children(namespace, directories: true) {
-                        for tag in children(model, directories: false) {
+            for host in children(root.appendingPathComponent(layout), directories: true, home: home) {
+                for namespace in children(host, directories: true, home: home) {
+                    for model in children(namespace, directories: true, home: home) {
+                        for tag in children(model, directories: false, home: home) {
                             guard let manifest = json(tag), let layers = manifest["layers"] as? [[String: Any]],
                                   layers.contains(where: { $0["mediaType"] as? String == "application/vnd.ollama.image.model" }),
                                   let config = manifest["config"] as? [String: Any] else { continue }
@@ -90,13 +159,15 @@ enum LocalModelDiskScanner {
         return result.sorted { $0.name < $1.name }
     }
 
-    static func studioModels(root: URL, runtime: LocalRuntime = .lmStudio) -> [LocalModel] {
+    static func studioModels(root: URL, runtime: LocalRuntime = .lmStudio,
+                             home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [LocalModel] {
+        guard !isProtectedLocation(root, home: home) else { return [] }
         var result: [LocalModel] = []
-        for publisher in children(root, directories: true) {
-            for repository in children(publisher, directories: true) {
+        for publisher in children(root, directories: true, home: home) {
+            for repository in children(publisher, directories: true, home: home) {
                 let key = publisher.lastPathComponent + "/" + repository.lastPathComponent
                 guard !key.lowercased().contains("embed") else { continue }
-                let files = children(repository, directories: false)
+                let files = children(repository, directories: false, home: home)
                 for file in files where file.pathExtension.lowercased() == "gguf" {
                     guard !file.lastPathComponent.lowercased().contains("mmproj"), isGGUF(file),
                           completeGGUF(file, files: files) else { continue }
