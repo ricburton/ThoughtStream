@@ -14,7 +14,7 @@ A native Mac chat app for watching work as it happens. Built with an AppKit shel
 
 [Build 27 release notes](https://github.com/ricburton/thoughtstream-releases/releases/tag/v0.9.0-b27) · [All Mac downloads](https://github.com/ricburton/thoughtstream-releases/releases) · [Report a problem](https://github.com/ricburton/thoughtstream-releases/issues)
 
-**[Build 30 source preview](https://github.com/ricburton/ThoughtStream/tree/8f5a1aa829b5e9a5c67b36bb105ca2a7b7223751)** includes the multi-pane workspace shown above. [Build it from source](https://github.com/ricburton/ThoughtStream/blob/8f5a1aa829b5e9a5c67b36bb105ca2a7b7223751/README.md#build-from-source).
+**[Build 30 source prerelease](https://github.com/ricburton/ThoughtStream/releases/tag/v0.9.0-b30-source)** includes the multi-pane workspace shown above. [Build it from source](https://github.com/ricburton/ThoughtStream/blob/8f5a1aa829b5e9a5c67b36bb105ca2a7b7223751/README.md#build-from-source).
 
 This repository contains application source. Release downloads and the signed update feed live in [thoughtstream-releases](https://github.com/ricburton/thoughtstream-releases). Account credentials, chats and signing keys are kept outside the repository. Connect your own provider account after installation.
 
