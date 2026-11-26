@@ -2,7 +2,19 @@
 
 A native Mac chat app for watching work as it happens. Built with an AppKit shell and a native, virtualized AppKit feed, local Codex and Claude Code connections, with their existing account sign-ins.
 
-[Download the signed Mac beta](https://github.com/ricburton/thoughtstream-releases/releases) · [Report a problem](https://github.com/ricburton/thoughtstream-releases/issues)
+## Screenshots
+
+| Side-by-side conversations | Activity logs |
+| --- | --- |
+| [![Four chat columns with the rightmost column split into two chats.](screenshots/conversations.png)](screenshots/conversations.png) | [![The same workspace with command output and tool results expanded above the chats.](screenshots/activity-logs.png)](screenshots/activity-logs.png) |
+
+## Releases
+
+**[Download the notarized Mac beta · 0.9.0, build 27](https://github.com/ricburton/thoughtstream-releases/releases/download/v0.9.0-b27/ThoughtStream-0.9.0-27-Apple-Silicon.zip)** for Apple Silicon Macs running macOS 14 or later. Unzip the app, move it to Applications, then open it. For updates, choose **ThoughtStream → Check for Updates…**.
+
+[Build 27 release notes](https://github.com/ricburton/thoughtstream-releases/releases/tag/v0.9.0-b27) · [All Mac downloads](https://github.com/ricburton/thoughtstream-releases/releases) · [Report a problem](https://github.com/ricburton/thoughtstream-releases/issues)
+
+**[Build 30 source preview](https://github.com/ricburton/ThoughtStream/tree/8f5a1aa829b5e9a5c67b36bb105ca2a7b7223751)** includes the multi-pane workspace shown above. [Build it from source](https://github.com/ricburton/ThoughtStream/blob/8f5a1aa829b5e9a5c67b36bb105ca2a7b7223751/README.md#build-from-source).
 
 This repository contains application source. Release downloads and the signed update feed live in [thoughtstream-releases](https://github.com/ricburton/thoughtstream-releases). Account credentials, chats and signing keys are kept outside the repository. Connect your own provider account after installation.
 
