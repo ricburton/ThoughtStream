@@ -3,7 +3,7 @@ import AppKit
 /// Whole-window looks. Rounded Panes and Matrix are experimental alternatives;
 /// Breathe is the default look with less chrome and more air (see `Breathe`).
 enum InterfaceStyle: String, CaseIterable {
-    case standard, matrix, roundedPanes, breathe
+    case breathe, standard, matrix, roundedPanes
 
     static let didChange = Notification.Name("ThoughtStream.interfaceStyleDidChange")
     private static let key = "unfold.interfaceStyle"
@@ -28,8 +28,8 @@ enum InterfaceStyle: String, CaseIterable {
         switch self {
         case .standard: return "Standard"
         case .matrix: return "Matrix"
-        case .roundedPanes: return "Rounded Panes (Experimental)"
-        case .breathe: return "Breathe"
+        case .roundedPanes: return "Rounded Chats (Experimental)"
+        case .breathe: return "Breathe (Default)"
         }
     }
     var keyEquivalent: String {

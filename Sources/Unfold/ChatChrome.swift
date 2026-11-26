@@ -52,7 +52,7 @@ class WorkspaceSurface: NSView {
 /// Clips the entire tab/feed/composer group into one contained pane.
 @MainActor
 final class PaneSurface: WorkspaceSurface {
-    static let inset: CGFloat = 16
+    static let inset: CGFloat = 4
     static let radius: CGFloat = 16
 
     override init(fill: NSColor = FeedPalette.canvas) {
@@ -68,7 +68,7 @@ final class PaneSurface: WorkspaceSurface {
         layer?.cornerRadius = rounded ? Self.radius : 0
         layer?.cornerCurve = .continuous
         layer?.masksToBounds = rounded
-        layer?.borderWidth = rounded ? 1 : 0
+        layer?.borderWidth = rounded ? 0.5 : 0
         effectiveAppearance.performAsCurrentDrawingAppearance {
             layer?.borderColor = FeedPalette.line.cgColor
         }
@@ -103,17 +103,23 @@ enum ChatChrome {
 
 @MainActor
 final class ChatControlBar: NSView {
-    var fill = FeedPalette.canvas { didSet { needsDisplay = true } }
-    /// Breathe separates the status line from the feed with space alone.
+    var fill = FeedPalette.chatControls { didSet { needsDisplay = true } }
+    /// Hairlines define the status strip without adding visual weight.
     var drawsBorder = true { didSet { needsDisplay = true } }
     override func draw(_ dirtyRect: NSRect) {
         fill.setFill(); bounds.fill()
         guard drawsBorder else { return }
         FeedPalette.line.setStroke()
         let border = NSBezierPath()
-        border.move(to: NSPoint(x: bounds.minX, y: bounds.minY + 0.5))
-        border.line(to: NSPoint(x: bounds.maxX, y: bounds.minY + 0.5))
-        border.lineWidth = 1; border.stroke()
+        for y in [bounds.minY + 0.25, bounds.maxY - 0.25] {
+            border.move(to: NSPoint(x: bounds.minX, y: y))
+            border.line(to: NSPoint(x: bounds.maxX, y: y))
+        }
+        border.lineWidth = 0.5; border.stroke()
+    }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }
 

@@ -43,7 +43,7 @@ final class ProjectHistoryCell: NSTableCellView {
         super.init(frame: .zero)
         let label = NSTextField(labelWithString: title)
         label.font = Typography.interface
-        label.textColor = status ? .secondaryLabelColor : .labelColor
+        label.textColor = status ? FeedPalette.muted : FeedPalette.text
         label.lineBreakMode = .byTruncatingTail
         textField = label
         toolTip = [title, detail].compactMap { $0 }.joined(separator: "\n")
@@ -53,6 +53,7 @@ final class ProjectHistoryCell: NSTableCellView {
             label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             label.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
+        InterfaceTypography.apply(to: self)
         if let detail { label.setAccessibilityLabel(title + ", " + detail) }
     }
     required init?(coder: NSCoder) { fatalError("Not implemented") }

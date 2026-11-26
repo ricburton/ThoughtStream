@@ -3,6 +3,8 @@ import AppKit
 /// Neutral workspace surfaces, with color reserved for actions and feed meaning.
 enum FeedPalette {
     static let canvas = color(0xFFFFFF, dark: 0x1E1E20, matrix: 0x000000)
+    /// A faint cool tint separates the chat controls beneath the title.
+    static let chatControls = color(0xF5F7FA, dark: 0x25282E, matrix: 0x021008)
     static let activePane = color(0xF7FAFE, dark: 0x20242B, matrix: 0x010A04)
     static let sidebar = color(0xF3F3F3, dark: 0x262628, matrix: 0x010603)
     /// What the navigation rail and pane cards sit on: the sidebar colour,

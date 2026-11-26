@@ -125,13 +125,18 @@ final class WorkspaceHistorySearch: NSObject, NSSearchFieldDelegate, NSTableView
         let result = results[row]
         let title = NSTextField(labelWithString: "\(result.document.title.replacingOccurrences(of: "\n", with: " ")) · \(URL(fileURLWithPath: result.document.project).lastPathComponent) · \(Self.age(result.document.updated))")
         title.font = Typography.interfaceEmphasis
+        title.textColor = FeedPalette.text
+        InterfaceTypography.apply(to: title)
         title.lineBreakMode = .byTruncatingTail
         let snippet = NSTextField(labelWithString: "")
         snippet.font = Typography.caption; snippet.textColor = FeedPalette.muted; snippet.lineBreakMode = .byTruncatingTail
         let text = result.snippet
-        let styled = NSMutableAttributedString(string: text, attributes: [.font: Typography.caption, .foregroundColor: FeedPalette.muted])
+        // Attributed text brings its own paragraph style; without one a long
+        // snippet wraps onto a hidden second line and pushes its row upward.
+        let oneLine = NSMutableParagraphStyle(); oneLine.lineBreakMode = .byTruncatingTail
+        let styled = NSMutableAttributedString(string: text, attributes: [.font: InterfaceTypography.font(Typography.caption), .foregroundColor: FeedPalette.muted, .paragraphStyle: oneLine])
         let range = (text as NSString).range(of: result.needle, options: [.caseInsensitive, .diacriticInsensitive])
-        if range.location != NSNotFound { styled.addAttributes([.font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: NSColor.labelColor], range: range) }
+        if range.location != NSNotFound { styled.addAttributes([.font: InterfaceTypography.font(NSFont.systemFont(ofSize: 12, weight: .semibold)), .foregroundColor: FeedPalette.text], range: range) }
         snippet.attributedStringValue = styled
         let stack = NSStackView(views: [title, snippet]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 5
         NSLayoutConstraint.activate([title.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20), snippet.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20)])
@@ -146,19 +151,54 @@ final class WorkspaceHistorySearch: NSObject, NSSearchFieldDelegate, NSTableView
     }
 }
 
-/// Keep the native bezel, focus ring, search and clear buttons, with more room inside.
+/// One quiet surface, with native search editing and clear-button behavior.
 @MainActor
 final class PaddedHistorySearchField: NSSearchField {
     override class var cellClass: AnyClass? {
         get { PaddedHistorySearchFieldCell.self }
         set { }
     }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isBezeled = false
+        isBordered = false
+        drawsBackground = false
+    }
+    required init?(coder: NSCoder) { fatalError("Not implemented") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        FeedPalette.input.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
+        super.draw(dirtyRect)
+    }
+
+    override var focusRingMaskBounds: NSRect { bounds }
+    override func drawFocusRingMask() {
+        NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
+    }
 }
 
 @MainActor
 final class PaddedHistorySearchFieldCell: NSSearchFieldCell {
+    override func edit(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText,
+                       delegate: Any?, event: NSEvent?) {
+        super.edit(withFrame: searchTextRect(forBounds: rect), in: controlView,
+                   editor: textObj, delegate: delegate, event: event)
+    }
+
+    override func select(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText,
+                         delegate: Any?, start selStart: Int, length selLength: Int) {
+        super.select(withFrame: searchTextRect(forBounds: rect), in: controlView,
+                     editor: textObj, delegate: delegate, start: selStart, length: selLength)
+    }
+
     override func searchTextRect(forBounds rect: NSRect) -> NSRect {
-        super.searchTextRect(forBounds: rect.insetBy(dx: 6, dy: 0))
+        var textRect = super.searchTextRect(forBounds: rect.insetBy(dx: 6, dy: 0))
+        let textFont = font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        textRect.size.height = min(rect.height, ceil(textFont.ascender - textFont.descender))
+        textRect.origin.y = rect.midY - textRect.height / 2
+        return textRect
     }
     override func searchButtonRect(forBounds rect: NSRect) -> NSRect {
         super.searchButtonRect(forBounds: rect.insetBy(dx: 6, dy: 0))

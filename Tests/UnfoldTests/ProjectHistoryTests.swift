@@ -114,7 +114,7 @@ final class ProjectHistoryTests: XCTestCase {
         }
         func descend(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descend) }
         let controller = try XCTUnwrap(workspace.window?.contentViewController)
-        let sidebar = try XCTUnwrap(descend(controller.view).compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel() == "Folders" })
+        let sidebar = try XCTUnwrap(descend(controller.view).compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel() == "Projects" })
         var imported: [UUID] = []
         defer {
             workspace.stopAll(); workspace.window?.close()
@@ -137,7 +137,7 @@ final class ProjectHistoryTests: XCTestCase {
         let pane = try XCTUnwrap(columns(controller).first)
         XCTAssertTrue(pane.session === existing)
         XCTAssertEqual(pane.prompt.string, "Keep my draft")
-        XCTAssertEqual(pane.tabIDs, [existing.id], "Discovery must not open historical chats as tabs")
+        XCTAssertEqual(columns(controller).compactMap { $0.session?.id }, [existing.id], "Discovery must not open historical chats")
         func click(_ title: String) throws {
             let row = try XCTUnwrap((0..<sidebar.numberOfRows).first {
                 (workspace.tableView(sidebar, viewFor: nil, row: $0) as? NSTableCellView)?.textField?.stringValue == title
@@ -146,15 +146,16 @@ final class ProjectHistoryTests: XCTestCase {
             XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(sidebar.action), to: sidebar.target, from: sidebar))
         }
         try click("Closed")
-        XCTAssertTrue(pane.session === closed)
-        XCTAssertEqual(pane.prompt.string, "Closed draft")
-        XCTAssertEqual(pane.tabIDs.filter { $0 == closed.id }.count, 1)
+        let reopened = try XCTUnwrap(columns(controller).first { $0.session === closed })
+        XCTAssertEqual(reopened.prompt.string, "Closed draft")
+        XCTAssertTrue(pane.session === existing)
+        XCTAssertEqual(columns(controller).filter { $0.session === closed }.count, 1)
         try click("Recovered chat")
-        let recovered = try XCTUnwrap(pane.session)
+        let recovered = try XCTUnwrap(columns(controller).compactMap(\.session).first { $0.thread == "new" })
         imported = [recovered.id]
         XCTAssertEqual(recovered.thread, "new")
         try click("Recovered chat")
-        XCTAssertEqual(pane.tabIDs.filter { $0 == recovered.id }.count, 1)
+        XCTAssertEqual(columns(controller).filter { $0.session === recovered }.count, 1)
         XCTAssertEqual(sidebar.numberOfRows, 5)
         workspace.toggleProjectHistory(a.path)
         XCTAssertEqual(sidebar.numberOfRows, 2)

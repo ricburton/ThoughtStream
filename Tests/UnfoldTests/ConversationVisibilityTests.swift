@@ -4,6 +4,54 @@ import XCTest
 
 final class ConversationVisibilityTests: XCTestCase {
     @MainActor
+    func testRestoredBlankPanesAreRemovedFromChatOrderAcrossProjects() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = WorkspaceStateStore(url: root.appendingPathComponent("workspace.json"))
+        let project = root.appendingPathComponent("Current")
+        let otherProject = root.appendingPathComponent("Other")
+        let drafts = (0..<3).map { index in
+            Session(project: index == 2 ? otherProject : project, storageRoot: root)
+        }
+        let existing = Session(project: project, title: "Existing conversation", storageRoot: root)
+        existing.report(.user, "An earlier message")
+        let sessions = drafts + [existing]
+        let regions = sessions.filter { $0.project == project }.map { ChatRegionState(id: UUID(), session: $0.id) }
+        let otherRegion = ChatRegionState(id: UUID(), session: drafts[2].id)
+        store.save(WorkspaceSnapshot(drafts: [drafts[2].id: "Keep this unsent draft"],
+            selectedProject: project.path, projects: [
+                project.path: ProjectViewState(regions: regions, layout: PaneLayout.arranged(regions.map(\.id), as: .columns), focusedPane: regions[0].id),
+                otherProject.path: ProjectViewState(regions: [otherRegion], layout: .pane(otherRegion.id), focusedPane: otherRegion.id)
+            ], sidebarConversationOrder: sessions.map(\.id)))
+        store.flush()
+        let workspace = WorkspaceWindow(restoredSessions: sessions, stateStore: store)
+        defer { workspace.stopAll(); workspace.window?.close(); try? FileManager.default.removeItem(at: root) }
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let content = try XCTUnwrap(workspace.window?.contentView)
+        let table = try XCTUnwrap(descendants(content).compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel() == "Chats" })
+        func titles() -> [String] {
+            (0..<table.numberOfRows).compactMap {
+                (workspace.tableView(table, viewFor: nil, row: $0) as? SidebarConversationCell)?.textField?.stringValue
+            }
+        }
+        XCTAssertEqual(titles(), ["Existing conversation"])
+        XCTAssertEqual(table.selectedRow, -1, "An active empty pane does not select a conversation")
+        workspace.selectProject(otherProject.path)
+        XCTAssertEqual(titles(), ["Existing conversation"])
+        drafts[2].report(.system, "Connected")
+        drafts[2].onStatus?("Ready")
+        XCTAssertEqual(titles(), ["Existing conversation"])
+        // Starting a previously saved draft should prepend it, not revive its old draft rank.
+        drafts[2].title = "Started conversation"
+        drafts[2].report(.user, "Keep this unsent draft")
+        drafts[2].onStatus?("Ready")
+        XCTAssertEqual(titles(), ["Started conversation", "Existing conversation"])
+        XCTAssertEqual(table.selectedRow, 0)
+        workspace.stopAll()
+        XCTAssertEqual(store.load()?.sidebarConversationOrder, [drafts[2].id, existing.id])
+        XCTAssertEqual(store.load()?.drafts[drafts[2].id], "Keep this unsent draft")
+    }
+
+    @MainActor
     func testOnlyConversationActivityMakesDraftVisible() {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -34,7 +82,7 @@ final class ConversationVisibilityTests: XCTestCase {
     }
 
     @MainActor
-    func testDraftStaysUsableAndHiddenUntilConversationStarts() throws {
+    func testDraftKeepsItsRegionButStaysOutOfChatsUntilConversationStarts() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = WorkspaceStateStore(url: root.appendingPathComponent("workspace.json"))
         let draft = Session(project: root, storageRoot: root)
@@ -55,24 +103,25 @@ final class ConversationVisibilityTests: XCTestCase {
             return controller.children.flatMap(columns)
         }
         let content = try XCTUnwrap(window.contentView)
-        let live = try XCTUnwrap(descendants(content).compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel() == "Live conversations" })
-        let projects = try XCTUnwrap(descendants(content).compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel() == "Folders" })
+        let live = try XCTUnwrap(descendants(content).compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel() == "Chats" })
+        let projects = try XCTUnwrap(descendants(content).compactMap { $0 as? NSTableView }.first { $0.accessibilityLabel() == "Projects" })
         let column = try XCTUnwrap(columns(try XCTUnwrap(window.contentViewController)).first)
         func titles() -> [String] {
             (0..<live.numberOfRows).compactMap { (workspace.tableView(live, viewFor: nil, row: $0) as? SidebarConversationCell)?.textField?.stringValue }
         }
-        XCTAssertEqual(titles(), ["No open conversations"])
+        XCTAssertEqual(titles(), ["No chats yet"])
         XCTAssertFalse(workspace.tableView(live, shouldSelectRow: 0))
         XCTAssertEqual((workspace.tableView(projects, viewFor: nil, row: 0) as? SidebarProjectCell)?.toolTip, "\(root.path)\n0 chats")
         XCTAssertEqual(column.prompt.string, "Restored draft")
         XCTAssertEqual(column.attachments, [image])
         column.prompt.string = "Keep my draft"
         workspace.newChat(nil)
-        let second = try XCTUnwrap(column.session)
+        let second = try XCTUnwrap(columns(try XCTUnwrap(window.contentViewController)).last?.session)
         createdID = second.id
         XCTAssertNotEqual(second.id, draft.id)
-        XCTAssertEqual(titles(), ["No open conversations"])
-        column.onSelectChat?(0)
+        XCTAssertEqual(titles(), ["No chats yet"])
+        XCTAssertEqual(columns(try XCTUnwrap(window.contentViewController)).count, 2)
+        workspace.select(0, in: column)
         XCTAssertTrue(column.session === draft)
         XCTAssertEqual(column.prompt.string, "Keep my draft")
         XCTAssertEqual(column.attachments, [image])

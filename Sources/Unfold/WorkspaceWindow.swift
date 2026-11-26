@@ -6,6 +6,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     var hasActiveWork: Bool { sessions.contains { $0.turn != nil || $0.queueWorker != nil } }
     private var selected: Int?
     let projectHistoryTable = NSTableView()
+    private let projectUpButton = ThemedButton(title: "", target: nil, action: nil)
+    private let projectDownButton = ThemedButton(title: "", target: nil, action: nil)
     private let conversationSidebar = NSTableView()
     private var conversationIDs: [UUID] = []
     private var sidebarConversationOrder: [UUID] = []
@@ -13,6 +15,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private let streamSplit = NSSplitViewController()
     private let tabSplitHost = TabSplitHostView()
     private let localSearch = WorkspaceHistorySearch()
+    let commandBar = CommandBar()
+    private let commandBarButton = AddPaneButton(title: "Command Bar", target: nil, action: nil)
     private let threadSummaries = ChatThreadSummaryCoordinator()
     private var searchOpenTask: Task<Void, Never>?
     private var primaryColumn = ChatColumn()
@@ -20,7 +24,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private var paneLayout: PaneLayout?
     private var layoutController: PaneLayoutController?
     private let paneCanvas = PaneCanvasController()
-    private(set) var layoutMode: WorkspaceLayoutMode = .panes
+    private let sidebarShadow = SidebarEdgeShadow()
     private var secondaryColumn: ChatColumn? { columns.dropFirst().first }
     private var drafts: [UUID: String] = [:]
     private var attachmentDrafts: [UUID: [ChatAttachment]] = [:]
@@ -38,6 +42,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private var projectHistoryErrors: [String: String] = [:]
     private var projectRows: [ProjectHistoryRow] = []
     private var historyLoads: [UUID: Task<Void, Never>] = [:]
+    private var hasDeferredTranscripts = false
+    private var transcriptUpdateScheduled = false
     private var stopped = false
     private var switchingProject = false
     private var activeColumnID: UUID? { didSet { refreshPaneFocus() } }
@@ -48,19 +54,25 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private var localObservers: [NSObjectProtocol] = []
     private var prompt: ComposerTextView { primaryColumn.prompt }
     private let heading = NSTextField(labelWithString: "ThoughtStream")
-    private let loginButton = NSButton(title: "Connect ChatGPT", target: nil, action: nil)
-    private let settingsButton = NSButton(title: "Settings", target: nil, action: nil)
-    private let addPaneButton = AddPaneButton(title: "Add Pane", target: nil, action: nil)
-    private var headerRow: NSStackView?
-    private var headerHeight: NSLayoutConstraint?
+    private let loginButton = ThemedButton(title: "Connect ChatGPT", target: nil, action: nil)
+    private let settingsButton = AddPaneButton(title: "Settings", target: nil, action: nil)
+    private let rebalanceButton = AddPaneButton(title: "Rebalance", target: nil, action: nil)
+    private let chatDisplayButton = AddPaneButton(title: "Just chat", target: nil, action: nil)
+    private let displayPreferences: UserDefaults?
+    private(set) var chatDisplayMode: ChatDisplayMode
+    private let splitBelowButton = AddPaneButton(title: "Split below", target: nil, action: nil)
+    private let newChatButton = AddPaneButton(title: "New Chat", target: nil, action: nil)
+    private let focusLeftButton = AddPaneButton(title: "Focus Left", target: nil, action: nil)
+    private let focusRightButton = AddPaneButton(title: "Focus Right", target: nil, action: nil)
+    private var headerRow: WorkspaceHeaderRow?
     private let bodySurface = WorkspaceSurface()
-    private let claudeConnectButton = NSButton(title: "Connect Claude", target: nil, action: nil)
+    private let claudeConnectButton = ThemedButton(title: "Connect Claude", target: nil, action: nil)
     private let claudeAccountStatus = NSTextField(wrappingLabelWithString: "Use your Claude Code sign-in on this Mac.")
     private var claudeSignInTask: Task<Void, Never>?
     private var activityTimer: Timer?
     private var historyCacheTimer: Timer?
     private var startedAt: Date?
-    private let providerPicker = NSPopUpButton()
+    private let providerPicker = ThemedPopUpButton()
     private let modelCatalog: ModelCatalog
     private let automaticallyDiscoverModels: Bool
     private var modelRefreshTasks: [AgentProvider: Task<Void, Never>] = [:]
@@ -73,10 +85,10 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private var currentInferenceSettings: InferenceSettings {
         inferenceSession?.inferenceSettings ?? InferenceSettings.load(provider: currentProvider)
     }
-    private let model = NSPopUpButton()
-    private let effort = NSPopUpButton()
-    private let speed = NSPopUpButton()
-    private let access = NSButton(title: "", target: nil, action: nil)
+    private let model = ThemedPopUpButton()
+    private let effort = ThemedPopUpButton()
+    private let speed = ThemedPopUpButton()
+    private let access = ThemedButton(title: "", target: nil, action: nil)
     private var sendButton: NSButton { primaryColumn.sendButton }
     private let status = NSTextField(labelWithString: "Choose a project or open the sample feed")
     private var activePane: StreamPane?
@@ -98,7 +110,10 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private var session: Session? { selected.flatMap { sessions.indices.contains($0) ? sessions[$0] : nil } }
 
     init(restoredSessions: [Session]? = nil, stateStore: WorkspaceStateStore? = nil, history: ProjectHistory? = nil, modelCatalog: ModelCatalog? = nil,
-         localModels: LocalModelRegistry? = nil) {
+         localModels: LocalModelRegistry? = nil, displayPreferences: UserDefaults? = nil) {
+        let preferences = displayPreferences ?? (restoredSessions == nil ? .standard : nil)
+        self.displayPreferences = preferences
+        chatDisplayMode = ChatDisplayMode(rawValue: preferences?.string(forKey: ChatDisplayMode.defaultsKey) ?? "") ?? .showLogs
         self.modelCatalog = modelCatalog ?? ModelCatalog(defaults: restoredSessions == nil ? .standard : nil)
         automaticallyDiscoverModels = restoredSessions == nil
         self.localModels = localModels ?? .shared
@@ -116,7 +131,6 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         window.title = "ThoughtStream"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
         window.minSize = NSSize(width: 860, height: 600); window.center(); window.isReleasedWhenClosed = false
         super.init(window: window)
-        layoutMode = saved?.layoutMode ?? .panes
         window.delegate = self
         window.onInteraction = { [weak self] view in
             guard let self, let column = self.columns.first(where: { view.isDescendant(of: $0.view) }),
@@ -132,6 +146,15 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         streamStates = saved?.streams ?? [:]
         closedTabs = saved?.closedTabs ?? []
         projectStates = saved?.projects ?? [:]
+        // Freeze migration in memory before navigation can save over the old layout.
+        for (path, state) in projectStates {
+            let ids = sessions.filter { $0.project.path == path }.map(\.id)
+            let migrated = state.chatRegionLayout(validIDs: Set(ids), fallbackIDs: ids.filter { !closedTabs.contains($0) },
+                                                  preferTabbed: saved?.layoutMode == .tabs)
+            var updated = state
+            updated.regions = migrated.regions; updated.layout = migrated.layout; updated.focusedPane = migrated.focused
+            projectStates[path] = updated
+        }
         // Migrate the previously saved single workspace into its project.
         if let id = saved?.primary, let s = sessions.first(where: { $0.id == id }), projectStates[s.project.path] == nil {
             projectStates[s.project.path] = ProjectViewState(primary: id, secondary: saved?.secondary)
@@ -140,6 +163,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             sidebarSplit.chatFraction = CGFloat(min(0.9, max(0.1, fraction)))
         }
         build()
+        if let content = window.contentView { InterfaceTypography.apply(to: content) }
         offlineIndicator = OfflineWindowIndicator(window: window)
         sidebarSplit.onResize = { [weak self] in self?.scheduleStateSave() }
         if let frame = saved?.windowFrame {
@@ -177,13 +201,27 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         outer.splitView = WorkspaceSplitView()
         outer.splitView.isVertical = true; outer.splitView.dividerStyle = .thin
         let rail = NSViewController(); rail.view = WorkspaceSurface(fill: FeedPalette.backdrop)
-        let new = NSButton(title: "", target: self, action: #selector(newChat(_:)))
-        new.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: nil)
-        new.imagePosition = .imageOnly; new.isBordered = false
-        new.contentTintColor = FeedPalette.muted
-        new.toolTip = "New chat (⌘N)"; new.setAccessibilityLabel("New chat")
+        let sidebarSurface = SidebarSurface()
+        sidebarSurface.translatesAutoresizingMaskIntoConstraints = false
+        rail.view.addSubview(sidebarSurface)
+        NSLayoutConstraint.activate([
+            sidebarSurface.leadingAnchor.constraint(equalTo: rail.view.leadingAnchor, constant: SidebarSurface.inset),
+            sidebarSurface.trailingAnchor.constraint(equalTo: rail.view.trailingAnchor, constant: -SidebarSurface.inset),
+            sidebarSurface.topAnchor.constraint(equalTo: rail.view.topAnchor, constant: SidebarSurface.inset),
+            sidebarSurface.bottomAnchor.constraint(equalTo: rail.view.bottomAnchor, constant: -SidebarSurface.inset)
+        ])
+        // Section headings carry their actions as quiet glyphs at the trailing edge.
+        func headingAction(_ button: ThemedButton, _ symbol: String, _ name: String, _ shortcut: String, _ action: Selector) {
+            button.target = self; button.action = action
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            button.imagePosition = .imageOnly; button.isBordered = false
+            button.contentTintColor = FeedPalette.muted
+            button.toolTip = "\(name) (\(shortcut))"; button.setAccessibilityLabel(name)
+        }
+        let new = ThemedButton(title: "", target: nil, action: nil)
+        headingAction(new, "square.and.pencil", "New chat", "⌘N", #selector(newChat(_:)))
         let chatsTitle = NSTextField(labelWithString: "Chats")
-        chatsTitle.font = Typography.section
+        chatsTitle.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
         chatsTitle.textColor = FeedPalette.muted
         let sidebarHeader = NSStackView(views: [chatsTitle, NSView(), new])
         sidebarHeader.orientation = .horizontal; sidebarHeader.alignment = .centerY
@@ -199,7 +237,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         conversationSidebar.allowsEmptySelection = true
         conversationSidebar.delegate = self; conversationSidebar.dataSource = self
         conversationSidebar.target = self; conversationSidebar.action = #selector(conversationSelected)
-        conversationSidebar.setAccessibilityLabel("Live conversations")
+        conversationSidebar.setAccessibilityLabel("Chats")
         liveScroll.documentView = conversationSidebar
         let tableScroll = NSScrollView(); tableScroll.hasVerticalScroller = true; tableScroll.drawsBackground = false
         tableScroll.autohidesScrollers = true; tableScroll.scrollerStyle = .overlay
@@ -208,51 +246,79 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         projectHistoryTable.backgroundColor = .clear; projectHistoryTable.intercellSpacing = .zero
         projectHistoryTable.focusRingType = .default
         projectHistoryTable.delegate = self; projectHistoryTable.dataSource = self; projectHistoryTable.target = self; projectHistoryTable.action = #selector(sidebarSelected)
-        projectHistoryTable.setAccessibilityLabel("Folders")
+        projectHistoryTable.setAccessibilityLabel("Projects")
         tableScroll.documentView = projectHistoryTable
         let inferenceControls = makeInferenceControls()
-        let open = SidebarActionButton(title: "Open Folder…", target: self, action: #selector(openProject(_:)))
-        open.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil); open.imagePosition = .imageLeading
-        let foldersTitle = NSTextField(labelWithString: "Folders")
+        let open = ThemedButton(title: "", target: nil, action: nil)
+        headingAction(open, "folder", "Open Project…", "⌘O", #selector(openProject(_:)))
+        open.setAccessibilityHelp("Open a project folder. Keyboard shortcut: Command-O.")
+        let foldersTitle = NSTextField(labelWithString: "Projects")
         foldersTitle.font = Typography.section
         foldersTitle.textColor = FeedPalette.muted
-        let folderHeader = NSStackView(views: [foldersTitle, NSView()])
-        folderHeader.orientation = .horizontal
+        for (button, symbol, name, shortcut, action) in [
+            (projectUpButton, "arrow.up", "Project Up", "⌘⇧↑", #selector(selectPreviousProject(_:))),
+            (projectDownButton, "arrow.down", "Project Down", "⌘⇧↓", #selector(selectNextProject(_:)))
+        ] {
+            headingAction(button, symbol, name, shortcut, action)
+            button.setAccessibilityHelp("Switch projects in latest-work order, wrapping at the end. Keyboard shortcut: \(shortcut).")
+        }
+        // Project actions sit in the heading, like New chat above them.
+        let folderHeader = NSStackView(views: [foldersTitle, NSView(), open, projectUpButton, projectDownButton])
+        folderHeader.orientation = .horizontal; folderHeader.alignment = .centerY
+        folderHeader.spacing = 0
         folderHeader.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 0)
-        let folderSection = NSStackView(views: [folderHeader, open, tableScroll])
+        let folderSection = NSStackView(views: [folderHeader, tableScroll])
         folderSection.orientation = .vertical; folderSection.alignment = .leading; folderSection.spacing = 8
-        sidebarSplit.addArrangedSubview(liveScroll)
-        sidebarSplit.addArrangedSubview(folderSection)
+        commandBarButton.target = self; commandBarButton.action = #selector(toggleCommandBar(_:))
+        commandBarButton.symbolName = "magnifyingglass"
+        commandBarButton.shortcutTitle = "⌘/"
+        commandBarButton.toolTip = "Command Bar (⌘/)"
+        commandBarButton.setAccessibilityLabel("Command Bar")
+        commandBarButton.setAccessibilityHelp("Search chats, projects, and actions. Keyboard shortcut: Command-Slash.")
+        let chatsSection = NSStackView(views: [sidebarHeader, localSearch.field, liveScroll])
+        chatsSection.orientation = .vertical; chatsSection.alignment = .leading; chatsSection.spacing = 8
+        // Keep 80 points of chat list visible at the divider's minimum.
+        sidebarSplit.minimumChatHeight = 28 + 36 + 80 + 2 * chatsSection.spacing
+        let projectsSeparator = NSBox()
+        projectsSeparator.boxType = .separator
+        projectsSeparator.setAccessibilityElement(false)
+        let projectSection = NSStackView(views: [folderSection, projectsSeparator, inferenceControls])
+        projectSection.orientation = .vertical; projectSection.alignment = .leading; projectSection.spacing = 4
+        projectSection.setCustomSpacing(0, after: folderSection)
+        sidebarSplit.addArrangedSubview(chatsSection)
+        sidebarSplit.addArrangedSubview(projectSection)
         NSLayoutConstraint.activate([
             folderHeader.widthAnchor.constraint(equalTo: folderSection.widthAnchor),
             folderHeader.heightAnchor.constraint(equalToConstant: 28),
-            open.widthAnchor.constraint(equalTo: folderSection.widthAnchor),
+            open.widthAnchor.constraint(equalToConstant: 28), open.heightAnchor.constraint(equalToConstant: 28),
+            projectUpButton.widthAnchor.constraint(equalToConstant: 28), projectUpButton.heightAnchor.constraint(equalToConstant: 28),
+            projectDownButton.widthAnchor.constraint(equalToConstant: 28), projectDownButton.heightAnchor.constraint(equalToConstant: 28),
             tableScroll.widthAnchor.constraint(equalTo: folderSection.widthAnchor),
-            tableScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 28)
+            tableScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 28),
+            projectsSeparator.widthAnchor.constraint(equalTo: projectSection.widthAnchor),
+            projectsSeparator.heightAnchor.constraint(equalToConstant: 1)
         ])
-        let railStack = NSStackView(views: [sidebarHeader, localSearch.field, sidebarSplit, inferenceControls])
+        let railStack = NSStackView(views: [sidebarSplit])
         railStack.orientation = .vertical; railStack.alignment = .leading; railStack.spacing = 4
-        railStack.setCustomSpacing(10, after: sidebarHeader)
-        railStack.setCustomSpacing(12, after: localSearch.field)
-        railStack.setCustomSpacing(12, after: sidebarSplit)
-        railStack.translatesAutoresizingMaskIntoConstraints = false; rail.view.addSubview(railStack)
+        railStack.translatesAutoresizingMaskIntoConstraints = false; sidebarSurface.addSubview(railStack)
         NSLayoutConstraint.activate([
             sidebarSplit.widthAnchor.constraint(equalTo: railStack.widthAnchor),
             sidebarSplit.heightAnchor.constraint(greaterThanOrEqualToConstant: 216),
-            open.heightAnchor.constraint(equalToConstant: 28),
-            railStack.leadingAnchor.constraint(equalTo: rail.view.leadingAnchor, constant: 12),
-            railStack.trailingAnchor.constraint(equalTo: rail.view.trailingAnchor, constant: -12),
-            railStack.topAnchor.constraint(equalTo: rail.view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            railStack.bottomAnchor.constraint(equalTo: rail.view.bottomAnchor, constant: -10),
+            railStack.leadingAnchor.constraint(equalTo: sidebarSurface.leadingAnchor, constant: 12 - SidebarSurface.inset),
+            railStack.trailingAnchor.constraint(equalTo: sidebarSurface.trailingAnchor, constant: SidebarSurface.inset - 12),
+            railStack.topAnchor.constraint(equalTo: sidebarSurface.safeAreaLayoutGuide.topAnchor, constant: 8),
+            railStack.bottomAnchor.constraint(equalTo: sidebarSurface.bottomAnchor, constant: SidebarSurface.inset - 10),
             sidebarHeader.widthAnchor.constraint(equalTo: railStack.widthAnchor),
             sidebarHeader.heightAnchor.constraint(equalToConstant: 28),
             new.widthAnchor.constraint(equalToConstant: 28), new.heightAnchor.constraint(equalToConstant: 28),
             localSearch.field.widthAnchor.constraint(equalTo: railStack.widthAnchor),
             localSearch.field.heightAnchor.constraint(equalToConstant: 36),
-            inferenceControls.widthAnchor.constraint(equalTo: railStack.widthAnchor)
+            inferenceControls.widthAnchor.constraint(equalTo: projectSection.widthAnchor),
+            folderSection.widthAnchor.constraint(equalTo: projectSection.widthAnchor),
+            liveScroll.widthAnchor.constraint(equalTo: chatsSection.widthAnchor),
+            liveScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 80)
         ])
-        // The system sidebar behavior wraps this in a floating glass surface.
-        // Use a regular split item so our flat background meets the window edge.
+        // Keep the custom raised surface and the native draggable split boundary.
         let sidebarItem = NSSplitViewItem(viewController: rail)
         sidebarItem.minimumThickness = 220; sidebarItem.maximumThickness = 280
         sidebarItem.holdingPriority = NSLayoutConstraint.Priority(260)
@@ -263,28 +329,60 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         loginButton.target = self; loginButton.action = #selector(signIn(_:))
         let settings = settingsButton
         settings.target = self; settings.action = #selector(showSettings(_:))
-        settings.bezelStyle = .rounded
-        settings.controlSize = .regular
-        settings.font = .systemFont(ofSize: 13, weight: .medium)
-        settings.contentTintColor = FeedPalette.text
+        settings.symbolName = "gearshape"
+        settings.isIconOnly = false
+        settings.shortcutTitle = "⌘,"
         settings.toolTip = "Settings (⌘,)"
-        settings.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
-        settings.imagePosition = .imageLeading
-        settings.image = settings.image?.withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
         settings.setAccessibilityLabel("Settings")
-        addPaneButton.target = self
-        addPaneButton.action = #selector(splitStream(_:))
-        addPaneButton.toolTip = "Add Pane (⌘P)"
-        addPaneButton.setAccessibilityLabel("Add Pane")
-        addPaneButton.setAccessibilityHelp("Add a pane. Keyboard shortcut: Command-P.")
-        addPaneButton.widthAnchor.constraint(equalToConstant: 146).isActive = true
-        addPaneButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
-        settingsButton.widthAnchor.constraint(equalToConstant: 100).isActive = true
-        settingsButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
-        let header = NSStackView(views: [NSView(), settingsButton, addPaneButton]); header.orientation = .horizontal; header.spacing = 10
-        header.alignment = .centerY
+        settings.setAccessibilityHelp("Open settings. Keyboard shortcut: Command-Comma.")
+        rebalanceButton.target = self
+        rebalanceButton.action = #selector(rebalanceColumns(_:))
+        rebalanceButton.symbolName = "rectangle.split.3x1"
+        rebalanceButton.shortcutTitle = ""
+        rebalanceButton.toolTip = "Reset all chat columns to a comfortable width"
+        rebalanceButton.setAccessibilityLabel("Rebalance")
+        rebalanceButton.setAccessibilityHelp("Reset all chat columns to a comfortable width, sized for this window.")
+        chatDisplayButton.target = self
+        chatDisplayButton.action = #selector(toggleChatDisplayMode(_:))
+        chatDisplayButton.setButtonType(.momentaryPushIn)
+        chatDisplayButton.shortcutTitle = "⇧⌘L"
+        chatDisplayButton.sizingTitles = [ChatDisplayMode.showLogs.title, ChatDisplayMode.justChat.title]
+        refreshChatDisplayButton()
+        splitBelowButton.target = self
+        splitBelowButton.action = #selector(splitBelow(_:))
+        splitBelowButton.symbolName = "rectangle.split.1x2"
+        splitBelowButton.shortcutTitle = "⇧⌘\\"
+        splitBelowButton.toolTip = "Split below (⇧⌘\\)"
+        splitBelowButton.setAccessibilityLabel("Split below")
+        splitBelowButton.setAccessibilityHelp("Open a new chat below the current chat. Keyboard shortcut: Shift-Command-Backslash.")
+        newChatButton.target = self
+        newChatButton.action = #selector(newChat(_:))
+        newChatButton.shortcutTitle = "⌘N"
+        newChatButton.toolTip = "New Chat (⌘N)"
+        newChatButton.setAccessibilityLabel("New Chat")
+        newChatButton.setAccessibilityHelp("Open a new chat beside the current chat. Keyboard shortcut: Command-N.")
+        // Sections by purpose, left to right: app, view, navigate, create.
+        let header = WorkspaceHeaderRow(sections: [
+            [[commandBarButton], [settingsButton]],
+            [[rebalanceButton], [chatDisplayButton]],
+            [[focusLeftButton, focusRightButton]],
+            [[splitBelowButton], [newChatButton]]
+        ])
         headerRow = header
-        headerHeight = header.heightAnchor.constraint(equalToConstant: 40)
+        for (button, symbol, shortcut, action, direction) in [
+            (focusLeftButton, "arrow.left", "⌘[", #selector(focusPreviousPane(_:)), "left"),
+            (focusRightButton, "arrow.right", "⌘]", #selector(focusNextPane(_:)), "right")
+        ] {
+            button.target = self
+            button.action = action
+            button.isEnabled = false
+            button.symbolName = symbol
+            button.isIconOnly = false
+            button.shortcutTitle = shortcut
+            button.toolTip = "\(button.title) (\(shortcut))"
+            button.setAccessibilityLabel(button.title)
+            button.setAccessibilityHelp("Focus the chat to the \(direction), wrapping at the end. Keyboard shortcut: \(shortcut).")
+        }
         status.font = .systemFont(ofSize: 12); status.textColor = .secondaryLabelColor; status.lineBreakMode = .byTruncatingMiddle
         streamSplit.splitView.isVertical = true; streamSplit.splitView.dividerStyle = .thin; body.addChild(streamSplit)
         configure(primaryColumn)
@@ -297,6 +395,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         localSearch.onVisibility = { [weak self] visible in
             guard let self else { return }
             self.streamSplit.view.isHidden = visible
+            self.sidebarShadow.isSuppressed = visible
+            self.refreshPaneFocus()
             if visible {
                 for column in self.columns { self.rememberDraft(column) }
                 if self.historyEnabled { self.localSearch.refresh() }
@@ -318,20 +418,38 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             child.translatesAutoresizingMaskIntoConstraints = false; body.view.addSubview(child)
         }
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: body.view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            header.leadingAnchor.constraint(equalTo: body.view.leadingAnchor, constant: 18), header.trailingAnchor.constraint(equalTo: body.view.trailingAnchor, constant: -24), headerHeight!,
-            tabSplitHost.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 2), tabSplitHost.leadingAnchor.constraint(equalTo: body.view.leadingAnchor), tabSplitHost.trailingAnchor.constraint(equalTo: body.view.trailingAnchor), tabSplitHost.bottomAnchor.constraint(equalTo: body.view.bottomAnchor)
+            header.topAnchor.constraint(equalTo: body.view.safeAreaLayoutGuide.topAnchor, constant: -2),
+            header.leadingAnchor.constraint(equalTo: body.view.leadingAnchor, constant: 12), header.trailingAnchor.constraint(equalTo: body.view.trailingAnchor, constant: -12),
+            tabSplitHost.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 6), tabSplitHost.leadingAnchor.constraint(equalTo: body.view.leadingAnchor), tabSplitHost.trailingAnchor.constraint(equalTo: body.view.trailingAnchor),
+            tabSplitHost.bottomAnchor.constraint(equalTo: body.view.bottomAnchor)
+        ])
+        paneCanvas.onHorizontalScroll = { [weak self] offset in
+            self?.sidebarShadow.scrollOffset = offset
+            self?.scheduleVisibleTranscripts()
+        }
+        sidebarShadow.translatesAutoresizingMaskIntoConstraints = false
+        body.view.addSubview(sidebarShadow, positioned: .above, relativeTo: nil)
+        NSLayoutConstraint.activate([
+            sidebarShadow.leadingAnchor.constraint(equalTo: body.view.leadingAnchor),
+            sidebarShadow.topAnchor.constraint(equalTo: body.view.topAnchor),
+            sidebarShadow.bottomAnchor.constraint(equalTo: body.view.bottomAnchor),
+            sidebarShadow.widthAnchor.constraint(equalToConstant: 16)
         ])
         outer.addSplitViewItem(NSSplitViewItem(viewController: body)); window?.contentViewController = outer
         applyHeaderStyle()
     }
-    /// Keep Settings immediately before Add Pane at the top trailing edge in every style.
+    /// Keep Settings, split, chat navigation and New Chat together at the top trailing edge.
     private func applyHeaderStyle() {
-        settingsButton.contentTintColor = FeedPalette.text
-        addPaneButton.needsDisplay = true
+        settingsButton.needsDisplay = true
+        rebalanceButton.needsDisplay = true
+        chatDisplayButton.needsDisplay = true
+        splitBelowButton.needsDisplay = true
+        newChatButton.needsDisplay = true
+        focusLeftButton.needsDisplay = true
+        focusRightButton.needsDisplay = true
         bodySurface.fill = InterfaceStyle.isBreathe ? FeedPalette.backdrop : FeedPalette.canvas
         headerRow?.isHidden = false
-        headerHeight?.constant = 40
+        headerRow?.needsLayout = true
     }
     private func openSearchResult(_ result: LocalHistorySearch.Result) {
         searchOpenTask?.cancel()
@@ -396,10 +514,18 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         access.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let tuning = NSStackView(views: [effort, speed])
         tuning.orientation = .horizontal; tuning.spacing = 6; tuning.distribution = .fillEqually
-        let footer = NSStackView(views: [providerPicker, model, tuning, access])
+        let modelsTitle = NSTextField(labelWithString: "Models")
+        modelsTitle.font = Typography.section
+        modelsTitle.textColor = FeedPalette.muted
+        let modelsHeader = NSStackView(views: [modelsTitle, NSView()])
+        modelsHeader.orientation = .horizontal; modelsHeader.alignment = .centerY
+        modelsHeader.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 0)
+        let footer = NSStackView(views: [modelsHeader, providerPicker, model, tuning, access])
         footer.orientation = .vertical; footer.alignment = .leading; footer.spacing = 6
         footer.setCustomSpacing(10, after: tuning)
         NSLayoutConstraint.activate([
+            modelsHeader.widthAnchor.constraint(equalTo: footer.widthAnchor),
+            modelsHeader.heightAnchor.constraint(equalToConstant: 28),
             providerPicker.widthAnchor.constraint(equalTo: footer.widthAnchor),
             model.widthAnchor.constraint(equalTo: footer.widthAnchor),
             tuning.widthAnchor.constraint(equalTo: footer.widthAnchor),
@@ -499,6 +625,11 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         paneLayout?.ids.compactMap { columnStore[$0] } ?? [primaryColumn]
     }
     private func refreshPaneFocus() {
+        rebalanceButton.isEnabled = showsPaneCanvas && !localSearch.isSearching && samplePane == nil
+        splitBelowButton.isEnabled = canSplit(activeColumnID.flatMap { columnStore[$0] } ?? primaryColumn, on: .bottom)
+        let canNavigate = columns.count > 1 && !localSearch.isSearching && samplePane == nil
+        focusLeftButton.isEnabled = canNavigate
+        focusRightButton.isEnabled = canNavigate
         for column in columns {
             column.updateFocusAppearance(active: column.columnID == activeColumnID)
         }
@@ -509,16 +640,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         // The pane canvas stays in the window across layout changes. Laying a
         // tree out while detached is far slower, and it keeps its scroll position.
         let showsCanvas = streamSplit.splitViewItems.count == 1 && streamSplit.splitViewItems[0].viewController === paneCanvas
-        if layoutMode == .tabs || !showsCanvas {
+        if !showsCanvas {
             for item in streamSplit.splitViewItems { streamSplit.removeSplitViewItem(item) }
-        }
-        if layoutMode == .tabs {
-            layoutController = nil
-            paneCanvas.setLayout(nil)
-            streamSplit.addSplitViewItem(NSSplitViewItem(viewController: primaryColumn))
-            window?.contentView?.layoutSubtreeIfNeeded()
-            refreshPaneFocus()
-            return
         }
         let controller = PaneLayoutController(layout: paneLayout, columns: columnStore, configureHost: { [weak self] host, column in
             self?.configurePaneHost(host, column)
@@ -548,15 +671,14 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     }
     /// True while the pane tree on screen can be changed in place.
     private var showsPaneCanvas: Bool {
-        layoutMode == .panes && layoutController != nil && paneCanvas.layout === layoutController
+        layoutController != nil && paneCanvas.layout === layoutController
             && streamSplit.splitViewItems.count == 1 && streamSplit.splitViewItems[0].viewController === paneCanvas
     }
     private var projects: [URL] {
-        var activity: [String: (project: URL, working: Bool, latest: Date)] = [:]
+        var activity: [String: (project: URL, latest: Date)] = [:]
         for session in sessions {
             let path = session.project.path
-            var entry = activity[path] ?? (session.project, false, .distantPast)
-            entry.working = entry.working || session.turn != nil
+            var entry = activity[path] ?? (session.project, .distantPast)
             entry.latest = max(entry.latest, session.lastConversationActivity ?? .distantPast)
             activity[path] = entry
         }
@@ -566,12 +688,12 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             activity[path] = entry
         }
         return activity.values.sorted {
-            if $0.working != $1.working { return $0.working }
             if $0.latest != $1.latest { return $0.latest > $1.latest }
             return $0.project.path.localizedStandardCompare($1.project.path) == .orderedAscending
         }.map(\.project)
     }
     private func configure(_ column: ChatColumn) {
+        column.setDisplayMode(chatDisplayMode)
         column.onSend = { [weak self, weak column] in
             guard let self, let column else { return }; self.send(from: column)
         }
@@ -581,18 +703,21 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         column.onNewChat = { [weak self, weak column] in
             guard let self, let column else { return }; self.newChat(in: column)
         }
-        column.onSelectChat = { [weak self, weak column] index in
-            guard let self, let column else { return }; self.select(index, in: column)
-        }
-        column.onCloseChat = { [weak self, weak column] index in
-            guard let self, let column else { return }; self.closeChat(index, in: column)
-        }
-        column.onTabDragEnded = { [weak self] in self?.layoutController?.clearPreviews() }
+        column.onChatDragEnded = { [weak self] in self?.layoutController?.clearPreviews() }
         column.onSplit = { [weak self, weak column] in
             guard let column else { return }; self?.splitPane(column, side: .right)
         }
         column.onSplitBelow = { [weak self, weak column] in
             guard let column else { return }; self?.splitPane(column, side: .bottom)
+        }
+        column.onSplitAbove = { [weak self, weak column] in
+            guard let column else { return }; self?.splitPane(column, side: .top)
+        }
+        column.onMoveLeft = { [weak self, weak column] in
+            guard let column else { return }; self?.moveChat(column, by: -1)
+        }
+        column.onMoveRight = { [weak self, weak column] in
+            guard let column else { return }; self?.moveChat(column, by: 1)
         }
         column.onClosePane = { [weak self, weak column] in
             guard let column else { return }; self?.closePane(column)
@@ -622,14 +747,16 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             self.scheduleStateSave()
         }
         column.stream.onViewStateChanged = { [weak self, weak column] state in
-            guard let self, let column, let id = column.session?.id else { return }
+            guard let self, let column, !column.transcriptDeferred, let id = column.session?.id else { return }
             column.streamStates[id] = state; self.scheduleStateSave()
         }
     }
     private func rememberDraft(_ column: ChatColumn) {
         if let s = column.session {
             drafts[s.id] = column.prompt.string; attachmentDrafts[s.id] = column.attachments
+            guard !column.transcriptDeferred else { return }
             column.streamStates[s.id] = column.stream.viewState
+            streamStates[s.id] = column.stream.viewState
         }
     }
     private func restoreStreamState(in column: ChatColumn) {
@@ -639,6 +766,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         column.stream.restoreViewState(state)
     }
     private func closeSplit() {
+        primaryColumn = focusedColumn
         for column in columns where column !== primaryColumn {
             rememberDraft(column); column.session?.detach(column.stream)
             column.view.removeFromSuperview(); column.removeFromParent()
@@ -646,21 +774,35 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         columnStore = [primaryColumn.columnID: primaryColumn]
         paneLayout = .pane(primaryColumn.columnID)
         activeColumnID = primaryColumn.columnID
+        selected = primaryColumn.session.flatMap { current in sessions.firstIndex { $0 === current } }
+        activePane = primaryColumn.stream
         renderLayout()
+        paneCanvas.balanceToFit()
     }
     func closePane(_ column: ChatColumn) {
-        guard layoutMode == .panes, columns.count > 1, columns.contains(column) else { return }
+        guard columns.contains(column) else { return }
+        if let id = column.session?.id {
+            closedTabs.removeAll { $0 == id }; closedTabs.append(id)
+        }
+        if columns.count == 1 {
+            paneCanvas.cancelCloseTransition()
+            rememberDraft(column)
+            column.display(nil)
+            selected = nil
+            window?.title = "ThoughtStream"; status.stringValue = "Ready"
+            refreshActivity(); refreshNavigation(); refreshProviderControls()
+            window?.makeFirstResponder(column.prompt)
+            navigateProject(by: -1)
+            saveWorkspaceState()
+            return
+        }
         let previousFocus = focusedColumn
         paneLayout = layoutController?.snapshot ?? paneLayout
         let balanceTarget = paneLayout?.removalBalanceTarget(for: column.columnID)
         guard let remaining = paneLayout?.removing(column.columnID) else { return }
+        let closingTransition = showsPaneCanvas ? paneCanvas.captureClosingPanes(columns) : nil
         rememberDraft(column)
         column.session?.detach(column.stream)
-        if InterfaceStyle.isBreathe, showsPaneCanvas {
-            // The closing pane fades where it stood while the others take over.
-            Breathe.popClosed(column.view, over: paneCanvas.view)
-            paneCanvas.softenTopologyChange(duration: 0.2)
-        }
         // A removed pane must release its transcript and working indicator too.
         column.display(nil)
         column.view.removeFromSuperview(); column.removeFromParent()
@@ -678,76 +820,37 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             paneCanvas.fit()
             refreshPaneFocus()
         } else { renderLayout() }
-        layoutController?.balance()
+        paneCanvas.balanceToFit()
         paneLayout = layoutController?.snapshot ?? paneLayout
         refreshNavigation()
         revealPane(nextFocus, animated: false)
         window?.makeFirstResponder(nextFocus.prompt)
+        paneCanvas.animateClosingPane(column.columnID, captured: closingTransition, remaining: columns)
     }
     @objc func closeFocusedPane(_ sender: Any?) { closePane(focusedColumn) }
     @objc func singlePane(_ sender: Any?) {
-        guard layoutMode == .panes else { return }
         closeSplit(); refreshNavigation()
-    }
-    @objc func chooseWorkspaceLayout(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let mode = WorkspaceLayoutMode(rawValue: raw) else { return }
-        setLayoutMode(mode)
-    }
-    func setLayoutMode(_ mode: WorkspaceLayoutMode) {
-        guard mode != layoutMode else { return }
-        rememberProject()
-        layoutMode = mode
-        if let path = projectSelection { restoreProject(path) }
-        refreshLayoutMenu()
-        settingsController?.setTabsOnly(mode == .tabs)
-        saveWorkspaceState()
-    }
-    func refreshLayoutMenu() {
-        let paneActions: [Selector] = [#selector(splitStream(_:)), #selector(stackStream(_:)),
-            #selector(focusPreviousPane(_:)), #selector(focusNextPane(_:)),
-            #selector(closeFocusedPane(_:)), #selector(singlePane(_:)),
-            #selector(arrangePanes(_:)), #selector(balancePanes(_:))]
-        func update(_ menu: NSMenu) {
-            for item in menu.items {
-                if let action = item.action, paneActions.contains(action) {
-                    let alias = item.identifier?.rawValue == "shortcutAlias"
-                    item.isHidden = layoutMode == .tabs || alias
-                    item.allowsKeyEquivalentWhenHidden = layoutMode == .panes && alias
-                }
-                if ["paneCommandsSeparator", "paneArrangeMenu"].contains(item.identifier?.rawValue ?? "") { item.isHidden = layoutMode == .tabs }
-                if item.action == #selector(selectPreviousTab(_:)) {
-                    item.title = layoutMode == .tabs ? "Previous Tab" : "Previous Chat or Pane"
-                } else if item.action == #selector(selectNextTab(_:)) {
-                    item.title = layoutMode == .tabs ? "Next Tab" : "Next Chat or Pane"
-                }
-                if let submenu = item.submenu { update(submenu) }
-            }
-        }
-        if let menu = NSApp.mainMenu { update(menu) }
     }
     private func rememberProject() {
         guard !switchingProject, samplePane == nil, let path = projectSelection else { return }
         columns.forEach(rememberDraft)
         var state = projectStates[path] ?? ProjectViewState()
-        if layoutMode == .tabs {
-            state.tabbed = TabbedViewState(selectedChat: primaryColumn.session?.id,
-                tabs: primaryColumn.tabIDs, tabOffset: primaryColumn.tabOffset,
-                streams: primaryColumn.streamStates, closedTabs: primaryColumn.closedTabIDs)
-            projectStates[path] = state
-            return
-        }
         state.layout = layoutController?.snapshot ?? paneLayout
-        state.panes = columns.map { PaneViewState(id: $0.columnID, session: $0.session?.id, tabs: $0.tabIDs, tabOffset: $0.tabOffset, streams: $0.streamStates, closedTabs: $0.closedTabIDs) }
+        state.paneCanvasSize = paneCanvas.hasCustomSizing ? paneCanvas.minimumCanvasSize : nil
+        state.compactColumnSizing = paneCanvas.usesCompactColumnSizing ? true : nil
+        state.regions = columns.map { column in
+            let stream = column.transcriptDeferred
+                ? column.session.flatMap { column.streamStates[$0.id] ?? streamStates[$0.id] }
+                : column.stream.viewState
+            return ChatRegionState(id: column.columnID, session: column.session?.id, stream: stream)
+        }
         state.focusedPane = focusedColumn.columnID
         state.primary = primaryColumn.session?.id
         state.secondary = secondaryColumn?.session?.id
         state.focusedSecondary = secondaryColumn != nil && focusedColumn === secondaryColumn
         state.tabs = projectChatIndices(path).map { sessions[$0].id }
-        state.primaryTabs = primaryColumn.tabIDs
-        state.secondaryTabs = secondaryColumn?.tabIDs
-        state.primaryTabOffset = primaryColumn.tabOffset
-        state.secondaryTabOffset = secondaryColumn?.tabOffset
+        state.panes = nil; state.primaryTabs = nil; state.secondaryTabs = nil
+        state.primaryTabOffset = nil; state.secondaryTabOffset = nil; state.tabbed = nil
         if secondaryColumn != nil {
             if case .split(_, let fraction, _, _) = state.layout { state.splitFraction = fraction }
         }
@@ -764,20 +867,24 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                 return lhs < rhs
             }
     }
-    private func chatIndices(in column: ChatColumn) -> [Int] {
-        column.tabIDs.compactMap { id in sessions.firstIndex { $0.id == id && $0.project.path == projectSelection } }
-    }
     private func refreshNavigation() {
         SessionHistoryCache.trim(sessions)
+        // Open panes and unsent drafts are workspace state, not conversations.
+        // Also prune old draft ranks so their first message adds them at the top.
         let started = sessions.filter(\.hasStartedConversation).map(\.id)
+        let visible = Set(started)
         let existing = Set(sidebarConversationOrder)
         let newChats = started.filter { !existing.contains($0) }
-        let sessionIDs = Set(sessions.map(\.id))
-        sidebarConversationOrder = Array(newChats.reversed()) + sidebarConversationOrder.filter { sessionIDs.contains($0) }
-        let visible = Set(started).subtracting(closedTabs)
-        conversationIDs = sidebarConversationOrder.filter { visible.contains($0) }
+        sidebarConversationOrder = Array(newChats.reversed()) + sidebarConversationOrder.filter { visible.contains($0) }
+        conversationIDs = sidebarConversationOrder
         if historyEnabled && !stopped {
-            let visibleSessions = sessions.filter { visible.contains($0.id) }
+            let focused = focusedColumn.session?.id
+            let open = Set(columns.compactMap { $0.session?.id })
+            let visibleSessions = sessions.filter { visible.contains($0.id) }.sorted {
+                if ($0.id == focused) != ($1.id == focused) { return $0.id == focused }
+                if open.contains($0.id) != open.contains($1.id) { return open.contains($0.id) }
+                return ($0.lastConversationActivity ?? .distantPast) > ($1.lastConversationActivity ?? .distantPast)
+            }
             threadSummaries.schedule(visibleSessions, generate: { [weak self] session, input in
                 guard let self else { throw CancellationError() }
                 if session.provider == .gemini {
@@ -798,7 +905,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
            let row = conversationIDs.firstIndex(of: currentID) {
             conversationSidebar.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         } else { conversationSidebar.deselectAll(nil) }
-        projectRows = projects.flatMap { project -> [ProjectHistoryRow] in
+        let orderedProjects = projects
+        projectRows = orderedProjects.flatMap { project -> [ProjectHistoryRow] in
             var rows: [ProjectHistoryRow] = [.project(project)]
             guard projectStates[project.path]?.historyExpanded == true else { return rows }
             let entries = historyEntries(in: project.path)
@@ -813,6 +921,9 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             return rows
         }
         projectHistoryTable.reloadData()
+        let canNavigateProjects = orderedProjects.count > 1
+        projectUpButton.isEnabled = canNavigateProjects
+        projectDownButton.isEnabled = canNavigateProjects
         let currentID = focusedColumn.session?.id
         let selectedRow = projectRows.firstIndex {
             if case .conversation(_, let entry) = $0 { return entry.sessionID != nil && entry.sessionID == currentID }
@@ -823,38 +934,50 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         }
         if let row = selectedRow { projectHistoryTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
         else { projectHistoryTable.deselectAll(nil) }
-        for column in columns {
-            let chats = chatIndices(in: column).map { ($0, sessions[$0]) }
-            column.updateTabs(chats, isSplit: secondaryColumn != nil)
-        }
         updateSplitAvailability()
+        for column in columns { column.updateHeader() }
+        if let current = focusedColumn.session { window?.title = current.sidebarTitle }
         scheduleStateSave()
     }
-    private func select(_ index: Int, in requestedColumn: ChatColumn? = nil) {
+    func select(_ index: Int, in requestedColumn: ChatColumn? = nil, centerPane: Bool = false) {
         guard sessions.indices.contains(index) else { return }
         let s = sessions[index]
         closedTabs.removeAll { $0 == s.id }
         var target = requestedColumn ?? primaryColumn
         if projectSelection != s.project.path || samplePane != nil { selectProject(s.project.path); target = primaryColumn }
         sampleTimer?.invalidate(); sampleTimer = nil; samplePane = nil
-        if !target.tabIDs.contains(s.id) { target.tabIDs.append(s.id) }
-        target.closedTabIDs.removeAll { $0 == s.id }
+        if let existing = columns.first(where: { $0.session === s }) {
+            target = existing
+            if target.transcriptDeferred {
+                target.attachDeferredTranscript()
+                restoreStreamState(in: target)
+            }
+        } else if target.session != nil {
+            let new = ChatColumn(); configure(new)
+            bind(s)
+            new.display(s, draft: drafts[s.id] ?? "", attachments: attachmentDrafts[s.id] ?? [])
+            restoreStreamState(in: new)
+            insertPane(new, beside: target, side: .right)
+            target = new
+        }
         rememberDraft(target)
         projectSelection = s.project.path
         bind(s)
-        // Re-selecting the active tab must preserve its live selection and navigation.
+        // Re-selecting the active chat must preserve its live selection and navigation.
         if target.session !== s {
             target.display(s, draft: drafts[s.id] ?? "", attachments: attachmentDrafts[s.id] ?? [])
             restoreStreamState(in: target)
         }
         if target === primaryColumn { selected = index }
-        if layoutMode == .tabs ? primaryColumn.parent == nil : (layoutController == nil || paneCanvas.parent == nil) { renderLayout() }
+        if layoutController == nil || paneCanvas.parent == nil { renderLayout() }
         activePane = target.stream
         activeColumnID = target.columnID
-        window?.title = s.title
+        window?.makeFirstResponder(target.prompt)
+        window?.title = s.sidebarTitle
         refreshProviderControls()
         status.stringValue = s.ready ? "Connected" : "Ready to connect"
         refreshActivity(); refreshNavigation(); loadHistoryIfNeeded(s)
+        revealPane(target, centerHorizontally: centerPane)
     }
     private func refreshActivity() {
         activityTimer?.invalidate(); activityTimer = nil
@@ -871,92 +994,19 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     }
     @objc func selectPreviousTab(_ sender: Any?) { selectAdjacentTab(offset: -1) }
     @objc func selectNextTab(_ sender: Any?) { selectAdjacentTab(offset: 1) }
-    private func selectAdjacentTab(offset: Int) {
-        guard samplePane == nil, projectSelection != nil else { return }
-        let column = focusedColumn
-        // Traverse tabs in layout order, including a stop for an empty pane.
-        // Keep the pane identity: the same chat can be open in several panes.
-        let destinations: [(column: ChatColumn, index: Int?)] = columns.flatMap { pane in
-            let tabs = chatIndices(in: pane)
-            return tabs.isEmpty ? [(pane, nil)] : tabs.map { (pane, Optional($0)) }
-        }
-        guard destinations.count > 1,
-              let position = destinations.firstIndex(where: {
-                  $0.column === column && $0.index.map { sessions[$0] === column.session } != false
-              }) else { return }
-        let target = destinations[(position + offset + destinations.count) % destinations.count]
-        if let index = target.index { select(index, in: target.column) }
-        activeColumnID = target.column.columnID
-        activePane = target.column.stream
-        revealPane(target.column)
-        window?.makeFirstResponder(target.column.prompt)
-        refreshProviderControls()
-        scheduleStateSave()
-    }
+    private func selectAdjacentTab(offset: Int) { movePaneFocus(by: offset) }
     @objc func closeTab(_ sender: Any?) {
         // ⌘W in Settings or a preview window closes that window, not a chat.
         if let key = NSApp.keyWindow, key !== window { key.performClose(sender); return }
-        let column = focusedColumn
-        if column.tabIDs.isEmpty {
-            if columns.count > 1 { closePane(column) }
-            else { window?.performClose(sender) }
-            return
-        }
-        guard let current = column.session, let index = sessions.firstIndex(where: { $0 === current }) else { return }
-        closeChat(index, in: column)
-    }
-    private func closeChat(_ index: Int, in column: ChatColumn) {
-        guard sessions.indices.contains(index), column.tabIDs.contains(sessions[index].id) else { return }
-        let closing = sessions[index]
-        let position = column.tabIDs.firstIndex(of: closing.id) ?? 0
-        if column.session === closing { rememberDraft(column) }
-        column.tabIDs.removeAll { $0 == closing.id }
-        column.closedTabIDs.removeAll { $0 == closing.id }; column.closedTabIDs.append(closing.id)
-        if !columns.contains(where: { $0.tabIDs.contains(closing.id) }) {
-            closedTabs.removeAll { $0 == closing.id }; closedTabs.append(closing.id)
-        }
-        if column.tabIDs.isEmpty {
-            if columns.count > 1 {
-                closePane(column)
-                saveWorkspaceState()
-            } else {
-                column.display(nil)
-                selected = nil
-                if layoutMode == .tabs {
-                    window?.title = "ThoughtStream"; status.stringValue = "Ready"
-                    refreshActivity(); refreshProviderControls()
-                }
-                refreshNavigation(); saveWorkspaceState()
-                if layoutMode == .panes { window?.performClose(nil) }
-            }
-            return
-        }
-        if column.session === closing {
-            let candidates = chatIndices(in: column)
-            // Choose the next tab in this pane's order, then the previous one.
-            let trailingIDs = Set(column.tabIDs.dropFirst(position))
-            if let next = candidates.first(where: { trailingIDs.contains(sessions[$0].id) }) ?? candidates.last {
-                select(next, in: column)
-            } else {
-                column.display(nil)
-                if column === primaryColumn { selected = nil }
-                activeColumnID = column.columnID
-                activePane = column.stream
-                status.stringValue = "Ready"; window?.title = "ThoughtStream"; refreshActivity()
-            }
-        }
-        refreshNavigation(); saveWorkspaceState()
+        closePane(focusedColumn)
+        saveWorkspaceState()
     }
     @objc func reopenClosedTab(_ sender: Any?) {
-        let column = focusedColumn
-        while let id = column.closedTabIDs.popLast() {
-            if let index = sessions.firstIndex(where: { $0.id == id }) {
-                select(index, in: column); return
-            }
-        }
         while let id = closedTabs.popLast() {
             if let index = sessions.firstIndex(where: { $0.id == id }) {
-                select(index, in: focusedColumn); return
+                select(index, in: focusedColumn)
+                window?.makeFirstResponder(focusedColumn.prompt)
+                return
             }
         }
     }
@@ -985,8 +1035,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         let row = conversationSidebar.selectedRow
         guard conversationIDs.indices.contains(row),
               let index = sessions.firstIndex(where: { $0.id == conversationIDs[row] }) else { return }
-        select(index, in: focusedColumn)
-        window?.makeFirstResponder(focusedColumn.prompt)
+        select(index, in: focusedColumn, centerPane: true)
     }
     @objc private func sidebarSelected() {
         guard projectRows.indices.contains(projectHistoryTable.selectedRow) else { return }
@@ -1003,7 +1052,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                                         thread: entry.thread, needsHistory: true, provider: entry.provider))
                 index = sessions.count - 1
             }
-            select(index, in: focusedColumn)
+            select(index, in: focusedColumn, centerPane: true)
         case .status(let path, _, let retry):
             if retry { discoverHistory(in: path) }
         }
@@ -1024,6 +1073,26 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         var seen = Set<String>()
         return (local + (projectHistoryEntries[path] ?? [])).filter { seen.insert($0.key).inserted }
     }
+    @objc func selectPreviousProject(_ sender: Any?) { navigateProject(by: -1) }
+    @objc func selectNextProject(_ sender: Any?) { navigateProject(by: 1) }
+
+    private func navigateProject(by offset: Int) {
+        // Follow the displayed project rows, ignoring expanded conversation rows.
+        let ordered = projectRows.compactMap { row -> URL? in
+            if case .project(let project) = row { return project }
+            return nil
+        }
+        guard ordered.count > 1 else { return }
+        let index = ordered.firstIndex { $0.path == projectSelection }
+        let destination = index.map { ($0 + offset + ordered.count) % ordered.count }
+            ?? (offset > 0 ? 0 : ordered.count - 1)
+        localSearch.dismiss()
+        selectProject(ordered[destination].path)
+        if projectHistoryTable.selectedRow >= 0 {
+            projectHistoryTable.scrollRowToVisible(projectHistoryTable.selectedRow)
+        }
+    }
+
     func selectProject(_ path: String) {
         defer { if projectStates[path]?.historyExpanded == true { discoverHistory(in: path) } }
         guard projectSelection != path || samplePane != nil else { return }
@@ -1041,82 +1110,64 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         }
         layoutController = nil
         paneCanvas.setLayout(nil)
-        primaryColumn = ChatColumn(tabsOnly: layoutMode == .tabs); configure(primaryColumn)
-        columnStore = [primaryColumn.columnID: primaryColumn]
-        paneLayout = .pane(primaryColumn.columnID)
         projectSelection = path; selected = nil
         let state = projectStates[path] ?? ProjectViewState()
-        let legacyTabs = projectChatIndices(path).map { sessions[$0].id }
-        if layoutMode == .tabs {
-            let saved = state.tabbedState(fallbackTabs: legacyTabs)
-            let validIDs = Set(sessions.filter { $0.project.path == path }.map(\.id))
-            var seen = Set<UUID>()
-            primaryColumn.tabIDs = saved.tabs.filter { validIDs.contains($0) && seen.insert($0).inserted }
-            primaryColumn.streamStates = saved.streams
-            primaryColumn.closedTabIDs = saved.closedTabs.filter { validIDs.contains($0) && !seen.contains($0) }
-            let available = chatIndices(in: primaryColumn)
-            let selected = available.first { sessions[$0].id == saved.selectedChat } ?? available.first
-            let current = selected.map { sessions[$0] }
-            if let current { bind(current) }
-            primaryColumn.display(current, draft: current.flatMap { drafts[$0.id] } ?? "", attachments: current.flatMap { attachmentDrafts[$0.id] } ?? [])
-        } else if let layout = state.layout, let savedPanes = state.panes,
-           !layout.ids.isEmpty, Set(layout.ids).count == layout.ids.count,
-           layout.ids.allSatisfy({ id in savedPanes.contains { $0.id == id } }) {
-            for column in columns { column.session?.detach(column.stream) }
-            columnStore = [:]
-            for id in layout.ids {
-                let saved = savedPanes.first { $0.id == id }!
-                let column = ChatColumn(id: id); configure(column)
-                column.tabIDs = saved.tabs
-                column.streamStates = saved.streams ?? [:]
-                column.closedTabIDs = saved.closedTabs ?? []
-                columnStore[id] = column
-                let current = sessions.first { $0.id == saved.session && $0.project.path == path && saved.tabs.contains($0.id) }
-                if let current { bind(current) }
-                column.display(current, draft: current.flatMap { drafts[$0.id] } ?? "", attachments: current.flatMap { attachmentDrafts[$0.id] } ?? [])
+        paneCanvas.minimumCanvasSize = state.paneCanvasSize ?? .zero
+        paneCanvas.hasCustomSizing = state.paneCanvasSize != nil
+        paneCanvas.usesCompactColumnSizing = state.compactColumnSizing ?? false
+        let validIDs = Set(sessions.filter { $0.project.path == path }.map(\.id))
+        let restored = state.chatRegionLayout(validIDs: validIDs, fallbackIDs: projectChatIndices(path).map { sessions[$0].id })
+        columnStore = [:]
+        hasDeferredTranscripts = restored.regions.count > PaneLayout.visibleColumnsBeforeScrolling
+        for region in restored.regions {
+            let column = ChatColumn(id: region.id); configure(column)
+            columnStore[region.id] = column
+            let current = sessions.first { $0.id == region.session && $0.project.path == path }
+            if let current {
+                bind(current)
+                if let stream = region.stream { column.streamStates[current.id] = stream }
             }
-            paneLayout = layout
-            primaryColumn = columns[0]
-        } else {
-            primaryColumn.streamStates = [:]
-            primaryColumn.closedTabIDs = []
-            primaryColumn.tabIDs = state.primaryTabs ?? legacyTabs
-            let available = chatIndices(in: primaryColumn)
-            let primary = available.first { sessions[$0].id == state.primary } ?? available.first
-            let current = primary.map { sessions[$0] }
-            if let current { bind(current) }
-            primaryColumn.display(current, draft: current.flatMap { drafts[$0.id] } ?? "", attachments: current.flatMap { attachmentDrafts[$0.id] } ?? [])
-            if state.secondaryTabs != nil || state.secondary != nil {
-                let second = ChatColumn(); configure(second)
-                second.tabIDs = state.secondaryTabs ?? legacyTabs
-                let current = sessions.first { $0.id == state.secondary && $0.project.path == path }
-                if let current { bind(current) }
-                second.display(current, draft: current.flatMap { drafts[$0.id] } ?? "", attachments: current.flatMap { attachmentDrafts[$0.id] } ?? [])
-                columnStore[second.columnID] = second
-                paneLayout = .split(vertical: true, fraction: state.splitFraction, first: .pane(primaryColumn.columnID), second: .pane(second.columnID))
-            }
+            column.display(current, draft: current.flatMap { drafts[$0.id] } ?? "", attachments: current.flatMap { attachmentDrafts[$0.id] } ?? [],
+                           deferTranscript: hasDeferredTranscripts && region.id != restored.focused)
         }
-        let openIDs = Set(columns.flatMap(\.tabIDs))
+        paneLayout = restored.layout
+        primaryColumn = columns[0]
+        let openIDs = Set(columns.compactMap { $0.session?.id })
         closedTabs.removeAll { openIDs.contains($0) }
         renderLayout()
         selected = primaryColumn.session.flatMap { current in sessions.firstIndex { $0 === current } }
-        for column in columns { restoreStreamState(in: column) }
-        let focused = state.focusedPane.flatMap { columnStore[$0] } ?? (state.focusedSecondary ? secondaryColumn : nil) ?? primaryColumn
+        for column in columns where !column.transcriptDeferred { restoreStreamState(in: column) }
+        let focused = restored.focused.flatMap { columnStore[$0] } ?? primaryColumn
         revealPane(focused, animated: false)
         activeColumnID = focused.columnID
         activePane = focused.stream; refreshProviderControls(); window?.makeFirstResponder(focused.prompt)
-        window?.title = session?.title ?? "ThoughtStream"
-        status.stringValue = session.map { $0.ready ? "Connected" : "Ready to connect" } ?? "Ready"
+        window?.title = focused.session?.sidebarTitle ?? "ThoughtStream"
+        status.stringValue = focused.session.map { $0.ready ? "Connected" : "Ready to connect" } ?? "Ready"
         refreshActivity(); refreshNavigation()
-        if layoutMode == .tabs {
-            primaryColumn.restoreTabOffset(state.tabbed?.tabOffset ?? 0)
-        } else if let panes = state.panes {
-            for saved in panes { columnStore[saved.id]?.restoreTabOffset(saved.tabOffset) }
-        } else {
-            if let offset = state.primaryTabOffset { primaryColumn.restoreTabOffset(offset) }
-            if let offset = state.secondaryTabOffset { secondaryColumn?.restoreTabOffset(offset) }
+        for column in columns where !column.transcriptDeferred {
+            if let session = column.session { loadHistoryIfNeeded(session) }
         }
-        for column in columns { if let session = column.session { loadHistoryIfNeeded(session) } }
+        updateVisibleTranscripts()
+    }
+
+    private func scheduleVisibleTranscripts() {
+        guard hasDeferredTranscripts, !switchingProject, !transcriptUpdateScheduled, !stopped else { return }
+        transcriptUpdateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.transcriptUpdateScheduled = false
+            self?.updateVisibleTranscripts()
+        }
+    }
+
+    private func updateVisibleTranscripts() {
+        guard hasDeferredTranscripts, showsPaneCanvas, !stopped else { return }
+        let pending = columnStore.values.filter { $0.transcriptDeferred }
+        for column in pending where !column.view.visibleRect.isEmpty {
+            column.attachDeferredTranscript()
+            restoreStreamState(in: column)
+            if let session = column.session { loadHistoryIfNeeded(session) }
+        }
+        hasDeferredTranscripts = pending.contains { $0.transcriptDeferred }
     }
 
     private func historyReader() throws -> ProjectHistory {
@@ -1360,6 +1411,64 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             effort: effort.titleOfSelectedItem ?? saved.effort,
             tier: speed.selectedItem?.representedObject as? String ?? saved.tier)
     }
+    @objc func toggleCommandBar(_ sender: Any?) {
+        if commandBar.isVisible { commandBar.dismiss(); return }
+        guard let window else { return }
+        commandBar.show(in: window, toggleButton: commandBarButton, items: commandBarItems()) { [weak self] query in
+            guard let self else { return }
+            self.localSearch.field.stringValue = query
+            self.localSearch.queryChanged()
+            self.window?.makeFirstResponder(self.localSearch.field)
+        }
+    }
+
+    private func commandBarItems() -> [CommandBarItem] {
+        var items: [CommandBarItem] = []
+        func action(_ title: String, _ symbol: String, _ shortcut: String = "", _ keywords: String = "", _ selector: Selector) {
+            let menuItem = NSMenuItem(title: title, action: selector, keyEquivalent: "")
+            guard validateMenuItem(menuItem) else { return }
+            items.append(CommandBarItem(id: NSStringFromSelector(selector), title: title, detail: "Action",
+                                        symbol: symbol, shortcut: shortcut, keywords: keywords) { [weak self] in
+                guard let self, self.validateMenuItem(menuItem) else { return }
+                NSApp.sendAction(selector, to: self, from: nil)
+            })
+        }
+        action("New Chat", "square.and.pencil", "⌘N", "create conversation", #selector(newChat(_:)))
+        action("Open Project…", "folder", "⌘O", "directory workspace", #selector(openProject(_:)))
+        action("Settings…", "gearshape", "⌘,", "preferences model", #selector(showSettings(_:)))
+        action(chatDisplayMode == .showLogs ? "Show Just Chat" : "Show Logs", "text.bubble", "⇧⌘L", "display activity", #selector(toggleChatDisplayMode(_:)))
+        action("Split Right", "rectangle.split.2x1", "⌘P", "pane", #selector(splitStream(_:)))
+        action("Split Below", "rectangle.split.1x2", "⇧⌘\\", "pane", #selector(splitBelow(_:)))
+        action("Focus Left", "arrow.left", "⌘[", "pane previous", #selector(focusPreviousPane(_:)))
+        action("Focus Right", "arrow.right", "⌘]", "pane next", #selector(focusNextPane(_:)))
+        action("Rebalance Columns", "rectangle.split.3x1", "", "resize arrange", #selector(rebalanceColumns(_:)))
+        action("Reopen Closed Chat", "arrow.uturn.backward", "⇧⌘T", "restore conversation", #selector(reopenClosedTab(_:)))
+        action("Find in Current Chat", "doc.text.magnifyingglass", "⌘F", "search", #selector(find(_:)))
+        items.append(CommandBarItem(id: "search", title: "Search All Chat History", detail: "Search messages and responses",
+                                    symbol: "text.magnifyingglass", keywords: "find archive") { [weak self] in
+            guard let self else { return }
+            self.window?.makeFirstResponder(self.localSearch.field)
+        })
+        for id in sidebarConversationOrder {
+            guard let chat = sessions.first(where: { $0.id == id }) else { continue }
+            items.append(CommandBarItem(id: id.uuidString, title: chat.sidebarTitle,
+                                        detail: "Chat · \(chat.project.lastPathComponent) · \(chat.provider.label)",
+                                        symbol: "bubble.left", keywords: chat.title) { [weak self] in
+                guard let self, let index = self.sessions.firstIndex(where: { $0.id == id }) else { return }
+                self.localSearch.dismiss()
+                self.select(index, centerPane: true)
+            })
+        }
+        for project in projects {
+            items.append(CommandBarItem(id: project.path, title: project.lastPathComponent,
+                                        detail: "Project · \(project.path)", symbol: "folder") { [weak self] in
+                self?.localSearch.dismiss()
+                self?.selectProject(project.path)
+            })
+        }
+        return items
+    }
+
     @objc func showSettings(_ sender: Any?) {
         if settingsController == nil {
             claudeConnectButton.target = self
@@ -1376,7 +1485,6 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                 claudeStatus: claudeAccountStatus, localModels: localModels)
             settingsController?.scansLocalModelsWhenShown = automaticallyDiscoverModels
         }
-        settingsController?.setTabsOnly(layoutMode == .tabs)
         settingsController?.showWindow(sender)
     }
     @objc func signIn(_ sender: Any?) {
@@ -1591,21 +1699,21 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     func canDropTab(_ payload: ChatTabDrag, on side: TabSplitSide, in target: ChatColumn? = nil) -> Bool {
         guard samplePane == nil,
               let source = columns.first(where: { $0.columnID == payload.columnID }),
-              source.tabIDs.contains(payload.sessionID),
+              source.session?.id == payload.sessionID,
               sessions.contains(where: { $0.id == payload.sessionID && $0.project.path == projectSelection }) else { return false }
-        return canSplit(target ?? source, on: side)
+        return target != nil && target !== source && canSplit(target!, on: side)
     }
 
     /// There is always room: panes compact, then the pane area scrolls.
     private func canSplit(_ column: ChatColumn, on side: TabSplitSide) -> Bool {
-        layoutMode == .panes && samplePane == nil && columns.contains(column)
+        samplePane == nil && columns.contains(column)
     }
 
-    /// Scroll a pane into view after keyboard navigation or a layout change.
-    /// Never called for a click: the pane under the pointer must not move.
-    private func revealPane(_ column: ChatColumn, animated: Bool = true) {
-        guard layoutMode == .panes, layoutController != nil, column.isViewLoaded else { return }
-        paneCanvas.reveal(column.view, animated: animated)
+    /// Reveal list/keyboard selections and layout changes. Direct interaction
+    /// inside a pane keeps the content under the pointer stationary.
+    private func revealPane(_ column: ChatColumn, animated: Bool = true, centerHorizontally: Bool = false) {
+        guard layoutController != nil, column.isViewLoaded else { return }
+        paneCanvas.reveal(column.view, animated: animated, centerHorizontally: centerHorizontally)
     }
 
     @objc func arrangePanes(_ sender: NSMenuItem) {
@@ -1613,9 +1721,9 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         arrangePanes(as: arrangement)
     }
     /// Rebuild the pane tree as a tidy grid, row or column, keeping every
-    /// pane's tabs, draft and reading position.
+    /// chat's draft and reading position.
     func arrangePanes(as arrangement: PaneArrangement) {
-        guard layoutMode == .panes, samplePane == nil, columns.count > 1,
+        guard samplePane == nil, columns.count > 1,
               let arranged = PaneLayout.arranged(columns.map(\.columnID), as: arrangement, viewport: paneCanvas.viewport) else { return }
         let focus = focusedColumn
         columns.forEach(rememberDraft)
@@ -1623,7 +1731,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         primaryColumn = columns[0]
         selected = primaryColumn.session.flatMap { current in sessions.firstIndex { $0 === current } }
         renderLayout()
-        layoutController?.balance()
+        paneCanvas.balanceToFit()
         paneLayout = layoutController?.snapshot ?? paneLayout
         activeColumnID = focus.columnID; activePane = focus.stream
         revealPane(focus, animated: false)
@@ -1631,42 +1739,62 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         window?.makeFirstResponder(focus.prompt)
     }
     @objc func balancePanes(_ sender: Any?) {
-        guard layoutMode == .panes, columns.count > 1 else { return }
-        layoutController?.balance()
+        guard columns.count > 1 else { return }
+        paneCanvas.balanceToFit()
         paneLayout = layoutController?.snapshot ?? paneLayout
         scheduleStateSave()
     }
 
     private func updateSplitAvailability() {
-        addPaneButton.isEnabled = canSplit(focusedColumn, on: .right)
-        for column in columns {
+        splitBelowButton.isEnabled = canSplit(focusedColumn, on: .bottom)
+        for (index, column) in columns.enumerated() {
+            column.canMoveLeft = index > 0
+            column.canMoveRight = index + 1 < columns.count
             column.updateSplitAvailability(split: canSplit(column, on: .right), stack: canSplit(column, on: .bottom))
         }
     }
+    private func moveChat(_ column: ChatColumn, by offset: Int) {
+        guard let index = columns.firstIndex(of: column), columns.indices.contains(index + offset),
+              let session = column.session else { return }
+        let target = columns[index + offset]
+        dropTab(ChatTabDrag(sessionID: session.id, columnID: column.columnID), on: offset < 0 ? .left : .right, in: target)
+    }
+    @objc func moveChatLeft(_ sender: Any?) { moveChat(focusedColumn, by: -1) }
+    @objc func moveChatRight(_ sender: Any?) { moveChat(focusedColumn, by: 1) }
     @discardableResult
     func dropTab(_ payload: ChatTabDrag, on side: TabSplitSide, in target: ChatColumn? = nil) -> Bool {
         guard canDropTab(payload, on: side, in: target),
               let source = columns.first(where: { $0.columnID == payload.columnID }),
-              let moved = sessions.first(where: { $0.id == payload.sessionID }) else { return false }
+              sessions.contains(where: { $0.id == payload.sessionID }) else { return false }
+        guard let destination = target else { return false }
         columns.forEach(rememberDraft)
-        let destination = target ?? source
-        let new = ChatColumn(); configure(new); new.tabIDs = [moved.id]
-        source.tabIDs.removeAll { $0 == moved.id }
-        new.streamStates[moved.id] = source.streamStates[moved.id] ?? streamStates[moved.id]
-        // Moving one tab only vacates its source; other views remain attached.
-        if source.session === moved {
-            let replacement = source.tabIDs.compactMap { id in sessions.first { $0.id == id } }.first
-            source.display(replacement, draft: replacement.flatMap { drafts[$0.id] } ?? "", attachments: replacement.flatMap { attachmentDrafts[$0.id] } ?? [])
-            restoreStreamState(in: source)
-        }
-        new.display(moved, draft: drafts[moved.id] ?? "", attachments: attachmentDrafts[moved.id] ?? [])
-        restoreStreamState(in: new)
-        insertPane(new, beside: destination, side: side)
+        let current = layoutController?.snapshot ?? paneLayout
+        guard let remaining = current?.removing(source.columnID) else { return false }
+        let old = PaneLayout.pane(destination.columnID), movedRegion = PaneLayout.pane(source.columnID)
+        let branch = PaneLayout.split(vertical: side.vertical, fraction: 0.5,
+                                      first: side.leading ? movedRegion : old, second: side.leading ? old : movedRegion)
+        paneLayout = remaining.replacing(destination.columnID, with: branch)
+        primaryColumn = columns[0]
+        selected = primaryColumn.session.flatMap { current in sessions.firstIndex { $0 === current } }
+        renderLayout()
+        activeColumnID = source.columnID; activePane = source.stream
+        revealPane(source)
+        window?.makeFirstResponder(source.prompt)
         refreshActivity(); refreshNavigation(); saveWorkspaceState()
         return true
     }
     private func insertPane(_ new: ChatColumn, beside column: ChatColumn, side: TabSplitSide) {
         paneLayout = layoutController?.snapshot ?? paneLayout
+        var preservedWidths: [UUID: CGFloat]?
+        if paneCanvas.hasCustomSizing, let layoutController, let paneLayout {
+            preservedWidths = Dictionary(uniqueKeysWithValues: zip(paneLayout.ids, layoutController.paneViews).map {
+                ($0.0, $0.1.bounds.width)
+            })
+            let inset = InterfaceStyle.hasRoundedPanes ? PaneSurface.inset : 0
+            let defaultWidth = PaneLayout.adaptiveMinimum(viewport: paneCanvas.viewport, paneInset: inset).width + 2 * inset
+            let newWidth = side.vertical ? defaultWidth : preservedWidths?[column.columnID]
+            preservedWidths?[new.columnID] = newWidth
+        }
         let old = PaneLayout.pane(column.columnID), added = PaneLayout.pane(new.columnID)
         let branch = PaneLayout.split(vertical: side.vertical, fraction: 0.5,
                                       first: side.leading ? added : old, second: side.leading ? old : added)
@@ -1684,7 +1812,12 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             paneCanvas.fit()
             refreshPaneFocus()
         } else { renderLayout() }
-        layoutController?.balance()
+        if let preservedWidths, let layoutController {
+            let width = layoutController.preserveWidths(preservedWidths)
+            paneCanvas.minimumCanvasSize.width = max(paneCanvas.minimumCanvasSize.width, width)
+            paneCanvas.fit()
+            layoutController.restoreFractions()
+        } else { paneCanvas.balanceToFit() }
         paneLayout = layoutController?.snapshot ?? paneLayout
         revealPane(new)
         Breathe.popOpen(new.view)
@@ -1692,21 +1825,49 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     }
     func splitPane(_ column: ChatColumn, side: TabSplitSide) {
         guard canSplit(column, on: side) else { return }
-        if projectSelection == nil { newChat(in: column) }
+        if column.session == nil { newChat(in: column); return }
         guard let path = projectSelection else { return }
         let s = Session(project: URL(fileURLWithPath: path), provider: AgentProvider.selected); sessions.append(s); bind(s)
         let new = ChatColumn(); configure(new)
-        new.tabIDs = [s.id]; new.display(s)
+        new.display(s)
         insertPane(new, beside: column, side: side)
         refreshNavigation()
     }
     @objc func splitStream(_ sender: Any?) { splitPane(focusedColumn, side: .right) }
     @objc func stackStream(_ sender: Any?) { splitPane(focusedColumn, side: .bottom) }
+    @objc func splitAbove(_ sender: Any?) { splitPane(focusedColumn, side: .top) }
     @objc func splitBelow(_ sender: Any?) { stackStream(sender) }
+    @objc func rebalanceColumns(_ sender: Any?) {
+        guard showsPaneCanvas else { return }
+        paneCanvas.shrinkColumnsToMinimum()
+        paneLayout = layoutController?.snapshot ?? paneLayout
+        revealPane(focusedColumn, animated: false)
+        saveWorkspaceState()
+    }
+    @objc func toggleChatDisplayMode(_ sender: Any?) {
+        chatDisplayMode = chatDisplayMode.next
+        displayPreferences?.set(chatDisplayMode.rawValue, forKey: ChatDisplayMode.defaultsKey)
+        paneCanvas.cancelCloseTransition()
+        columns.forEach { $0.setDisplayMode(chatDisplayMode) }
+        refreshChatDisplayButton()
+        window?.contentView?.layoutSubtreeIfNeeded()
+    }
+
+    private func refreshChatDisplayButton() {
+        // The button names what a click does, and never tints to mark a mode.
+        let logsUp = chatDisplayMode == .showLogs
+        chatDisplayButton.title = chatDisplayMode.next.title
+        chatDisplayButton.symbolName = logsUp ? "bubble.left.and.bubble.right" : "list.bullet.rectangle"
+        chatDisplayButton.state = .off
+        chatDisplayButton.toolTip = logsUp ? "Hide logs and show just the chat (⇧⌘L)" : "Show logs above the chat (⇧⌘L)"
+        chatDisplayButton.setAccessibilityLabel("Chat display mode")
+        chatDisplayButton.setAccessibilityValue(logsUp ? "Logs and chat" : "Chat only")
+        chatDisplayButton.setAccessibilityHelp("Switch between Show logs and Just chat. Keyboard shortcut: Command-Shift-L.")
+        chatDisplayButton.needsDisplay = true
+    }
     @objc func focusNextPane(_ sender: Any?) { movePaneFocus(by: 1) }
     @objc func focusPreviousPane(_ sender: Any?) { movePaneFocus(by: -1) }
     private func movePaneFocus(by offset: Int) {
-        guard layoutMode == .panes else { return }
         let panes = columns
         guard panes.count > 1, let index = panes.firstIndex(of: focusedColumn) else { return }
         let target = panes[(index + offset + panes.count) % panes.count]
@@ -1731,8 +1892,14 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     @objc func increaseText(_ sender: Any?) { focusedColumn.stream.changeFont(1) }
     @objc func decreaseText(_ sender: Any?) { focusedColumn.stream.changeFont(-1) }
     @objc func resetText(_ sender: Any?) { focusedColumn.stream.resetFont() }
-    @objc func find(_ sender: Any?) { activePane?.find() }
-    @objc func findNext(_ sender: Any?) { activePane?.findNext() }
+    @objc func find(_ sender: Any?) {
+        if chatDisplayMode == .justChat { focusedColumn.conversation.find() }
+        else { activePane?.find() }
+    }
+    @objc func findNext(_ sender: Any?) {
+        if chatDisplayMode == .justChat { focusedColumn.conversation.find(next: true) }
+        else { activePane?.findNext() }
+    }
     private func scheduleStateSave() {
         guard !restoringWorkspace else { return }
         pendingStateSave?.cancel()
@@ -1744,7 +1911,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         guard !switchingProject else { return }
         rememberProject()
         let current = projectSelection.flatMap { projectStates[$0] }
-        stateStore.save(WorkspaceSnapshot(primary: current?.primary, secondary: current?.secondary, drafts: drafts, streams: streamStates, windowFrame: window.map { NSStringFromRect($0.styleMask.contains(.fullScreen) ? normalFrame ?? $0.frame : $0.frame) }, closedTabs: closedTabs, selectedProject: projectSelection, projects: projectStates, attachmentDrafts: attachmentDrafts, sidebarChatFraction: Double(sidebarSplit.chatFraction), sidebarConversationOrder: sidebarConversationOrder, layoutMode: layoutMode))
+        stateStore.save(WorkspaceSnapshot(primary: current?.primary, secondary: current?.secondary, drafts: drafts, streams: streamStates, windowFrame: window.map { NSStringFromRect($0.styleMask.contains(.fullScreen) ? normalFrame ?? $0.frame : $0.frame) }, closedTabs: closedTabs, selectedProject: projectSelection, projects: projectStates, attachmentDrafts: attachmentDrafts, sidebarChatFraction: Double(sidebarSplit.chatFraction), sidebarConversationOrder: sidebarConversationOrder))
     }
     /// Full screen is not a size to reopen at; remember the windowed frame.
     private var normalFrame: NSRect?
@@ -1752,8 +1919,9 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         if let window, !window.styleMask.contains(.fullScreen) { normalFrame = window.frame }
     }
     func windowDidResize(_ notification: Notification) {
+        // fit() arranges the tree when its viewport or minimum changes.
+        // A second restore here reflowed all columns again for the same event.
         if layoutController != nil { paneCanvas.fit() }
-        layoutController?.restoreFractions()
         rememberNormalFrame(); updateSplitAvailability(); scheduleStateSave()
     }
     func windowDidBecomeKey(_ notification: Notification) { refreshPaneFocus() }
@@ -1773,6 +1941,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         }
         layoutController?.applyInterfaceStyle()
         for column in columns { column.applyInterfaceStyle() }
+        if let content = window.contentView { InterfaceTypography.apply(to: content) }
         window.contentView?.layoutSubtreeIfNeeded()
         if layoutController != nil { paneCanvas.fit() }
         layoutController?.restoreFractions()
@@ -1782,6 +1951,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     }
 
     func stopAll() {
+        commandBar.dismiss(restoreFocus: false)
+        paneCanvas.cancelCloseTransition()
         stopped = true
         threadSummaries.stop()
         localSearch.stop(); searchOpenTask?.cancel()
@@ -1820,7 +1991,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                 guard let text = question["question"] as? String else { continue }
                 let label = NSTextField(wrappingLabelWithString: text)
                 label.preferredMaxLayoutWidth = 520
-                let picker = NSPopUpButton()
+                let picker = ThemedPopUpButton()
                 picker.addItems(withTitles: (question["options"] as? [[String: Any]] ?? []).compactMap { $0["label"] as? String })
                 let answer = NSTextField(); answer.placeholderString = question["multiSelect"] as? Bool == true ? "Or enter answers separated by commas" : "Or type your own answer"
                 answer.widthAnchor.constraint(equalToConstant: 520).isActive = true
@@ -1831,8 +2002,9 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
             alert.buttons.last?.title = "Send answer"
         }
         activeInput = (request, alert)
-        alert.beginSheetModal(for: window) { response in
-            Task { @MainActor in
+        alert.beginSheetModal(for: window) { [weak self] response in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
                 self.activeInput = nil
                 defer { DispatchQueue.main.async { [weak self] in self?.presentNextRequest() } }
                 guard s.isPending(id) else { return }
@@ -1869,10 +2041,10 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         if tableView === conversationSidebar {
             guard conversationIDs.indices.contains(row),
                   let conversation = sessions.first(where: { $0.id == conversationIDs[row] }) else {
-                return SidebarConversationCell(title: "No open conversations", project: "Start a new chat above", isRunning: false, isEmpty: true)
+                return SidebarConversationCell(title: "No chats yet", project: "Start a new chat above", isRunning: false, isEmpty: true)
             }
             let cell = SidebarConversationCell(title: conversation.sidebarTitle, project: conversation.provider.label + " · " + conversation.project.lastPathComponent, isRunning: conversation.turn != nil)
-            cell.toolTip = conversation.title + "\n" + conversation.provider.label + " · " + conversation.project.lastPathComponent
+            cell.toolTip = conversation.sidebarTitle + "\n" + conversation.provider.label + " · " + conversation.project.lastPathComponent
             return cell
         }
         guard projectRows.indices.contains(row) else { return nil }
@@ -1898,7 +2070,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         for item in streamSplit.splitViewItems { streamSplit.removeSplitViewItem(item) }
         primaryColumn.display(nil)
         let pane = primaryColumn.stream; activePane = pane; samplePane = pane; streamSplit.addSplitViewItem(NSSplitViewItem(viewController: primaryColumn))
-        status.stringValue = "SIMULATED SAMPLE — no model request or command execution"; primaryColumn.updateTabs([], isSplit: false)
+        refreshPaneFocus()
+        status.stringValue = "SIMULATED SAMPLE — no model request or command execution"; primaryColumn.updateHeader()
         let records = Sample.richRecords
         var index = 0
         pane.append(records[0]); index = 1
@@ -1915,19 +2088,26 @@ extension WorkspaceWindow: NSMenuItemValidation {
     /// Dim commands that have nothing to act on, as Mac menus do.
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
-        case #selector(chooseWorkspaceLayout(_:)):
-            item.state = item.representedObject as? String == layoutMode.rawValue ? .on : .off
+        case #selector(toggleChatDisplayMode(_:)):
+            item.state = chatDisplayMode == .showLogs ? .on : .off
             return true
         case #selector(forkSession(_:)), #selector(interrupt(_:)), #selector(send(_:)):
             return focusedColumn.session != nil
         case #selector(exportLog(_:)): return session != nil
-        case #selector(closeFocusedPane(_:)), #selector(singlePane(_:)),
+        case #selector(selectPreviousProject(_:)), #selector(selectNextProject(_:)):
+            return projectUpButton.isEnabled
+        case #selector(closeFocusedPane(_:)):
+            return samplePane == nil && (columns.count > 1 || focusedColumn.session != nil)
+        case #selector(singlePane(_:)),
              #selector(focusPreviousPane(_:)), #selector(focusNextPane(_:)),
              #selector(arrangePanes(_:)), #selector(balancePanes(_:)):
-            return layoutMode == .panes && samplePane == nil && columns.count > 1
+            return samplePane == nil && columns.count > 1
         case #selector(splitStream(_:)): return canSplit(focusedColumn, on: .right)
         case #selector(stackStream(_:)), #selector(splitBelow(_:)): return canSplit(focusedColumn, on: .bottom)
-        case #selector(reopenClosedTab(_:)): return !closedTabs.isEmpty || !focusedColumn.closedTabIDs.isEmpty
+        case #selector(splitAbove(_:)): return canSplit(focusedColumn, on: .top)
+        case #selector(moveChatLeft(_:)): return columns.first !== focusedColumn && focusedColumn.session != nil
+        case #selector(moveChatRight(_:)): return columns.last !== focusedColumn && focusedColumn.session != nil
+        case #selector(reopenClosedTab(_:)): return !closedTabs.isEmpty
         default: return true
         }
     }

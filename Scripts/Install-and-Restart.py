@@ -19,7 +19,8 @@ def app_pids():
     listing = subprocess.check_output(["/bin/ps", "-axo", "pid=,comm="], text=True)
     return [int(line.strip().split(None, 1)[0]) for line in listing.splitlines()
             if line.rstrip().endswith(("/Unfold.app/Contents/MacOS/Unfold",
-                                       "/ThoughtStream.app/Contents/MacOS/ThoughtStream"))]
+                                       "/ThoughtStream.app/Contents/MacOS/ThoughtStream",
+                                       "/ThoughtStream Beta.app/Contents/MacOS/ThoughtStream"))]
 
 
 def signing_hash(app):
@@ -40,12 +41,18 @@ fcntl.flock(install_lock.fileno(), fcntl.LOCK_EX)
 
 source = Path(sys.argv[1])
 reopen = "--no-open" not in sys.argv[2:]
+restart_once = "--restart-once" in sys.argv[2:]
 restart_pause = Path.home() / "Library/Caches/UnfoldNative/restarts-paused"
-if reopen and restart_pause.exists():
+if reopen and restart_pause.exists() and not restart_once:
     print(f"Automatic ThoughtStream restarts are paused: {restart_pause}")
     print("The app was left untouched. Use --no-open to install without launching.")
     sys.exit(0)
+if reopen and restart_once:
+    print("One-time manual restart requested; automatic restart settings are unchanged.", flush=True)
 destination = Path.home() / "Applications/ThoughtStream.app"
+beta = destination.with_name("ThoughtStream Beta.app")
+if destination.is_symlink() and destination.resolve() == beta:
+    destination = beta
 legacy = destination.parent / "Unfold.app"
 destination.parent.mkdir(parents=True, exist_ok=True)
 # A repeated/KeepAlive launch must be a no-op for an already installed build.

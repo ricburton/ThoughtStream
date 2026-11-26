@@ -38,76 +38,30 @@ final class BreatheStyleTests: XCTestCase {
     }
 
     @MainActor
-    func testBreatheFoldsPaneChromeIntoOneRowAndStandardRestoresIt() throws {
+    func testStylesKeepSingleTitleAboveCompactChatControls() throws {
         let original = InterfaceStyle.current
         defer { InterfaceStyle.current = original }
-        InterfaceStyle.current = .standard
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let chats = ["Parser", "A much longer conversation title that cannot fit", "Notes"].map {
-            Session(project: root, title: $0, storageRoot: root)
-        }
+        let chat = Session(project: root, title: "A long conversation title that wraps across the header", storageRoot: root)
         let column = ChatColumn()
         let window = NSWindow(contentViewController: column)
         window.isReleasedWhenClosed = false
         defer { window.close() }
         window.setContentSize(NSSize(width: 420, height: 800))
-        column.tabIDs = chats.map(\.id)
-        column.display(chats[0])
-        column.updateTabs(Array(chats.enumerated()), isSplit: true)
-        column.view.layoutSubtreeIfNeeded()
-
-        let split = try XCTUnwrap(button("Split pane to the right", in: column.view))
-        let stack = try XCTUnwrap(button("Stack pane below", in: column.view))
-        let close = try XCTUnwrap(button("Close pane", in: column.view))
-        let more = try XCTUnwrap(button("Pane options", in: column.view))
-        let follow = try XCTUnwrap(descendants(column.view).compactMap { $0 as? NSButton }.first { $0.title == "Follow live" })
-        let stop = try XCTUnwrap(descendants(column.view).compactMap { $0 as? NSButton }.first { $0.title == "Stop" })
-        let strip = try XCTUnwrap(descendants(column.view).compactMap { $0 as? ChatTabItem }.first?.enclosingScrollView)
-        let standardStreamTop = column.stream.view.frame.maxY
-        let standardStrip = strip.convert(strip.bounds, to: column.view)
-        XCTAssertTrue(more.isHidden)
-        XCTAssertFalse(follow.isHidden)
-        XCTAssertFalse(stop.isHidden)
-
-        InterfaceStyle.current = .breathe
-        column.applyInterfaceStyle()
-        column.view.layoutSubtreeIfNeeded()
-        for removed in [split, stack, close, follow, stop] { XCTAssertTrue(removed.isHidden, removed.title) }
-        XCTAssertFalse(more.isHidden)
-        XCTAssertFalse(column.view.hasAmbiguousLayout)
-        // Tabs share the buttons' row, and the feed takes the height that frees.
-        let row = more.convert(more.bounds, to: column.view)
-        let breatheStrip = strip.convert(strip.bounds, to: column.view)
-        XCTAssertEqual(breatheStrip.midY, row.midY, accuracy: 1)
-        XCTAssertLessThan(breatheStrip.maxX, row.minX)
-        XCTAssertGreaterThan(column.stream.view.frame.maxY, standardStreamTop + 20)
-        // Titles retain their first three words, so a crowded row scrolls.
-        let tabs = descendants(column.view).compactMap { $0 as? ChatTabItem }
-        XCTAssertEqual(tabs.count, 3)
-        XCTAssertGreaterThan(tabs.map(\.frame.maxX).max() ?? 0, strip.contentSize.width)
-        XCTAssertFalse(try XCTUnwrap(button("Show more tabs to the right", in: strip)).isHidden)
-        XCTAssertLessThan(tabs[1].frame.width, Breathe.tabMaximum)
-        let selection = try XCTUnwrap(descendants(column.view).first { $0 is BreatheTabSelection })
-        XCTAssertFalse(selection.isHidden)
-        XCTAssertEqual(selection.frame, tabs[0].frame)
-        column.display(chats[2])
-        column.updateTabs(Array(chats.enumerated()), isSplit: true)
-        column.view.layoutSubtreeIfNeeded()
-        // The surface slides to the newly selected tab.
-        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
-        let reselected = descendants(column.view).compactMap { $0 as? ChatTabItem }
-        XCTAssertEqual(selection.frame, reselected[2].frame)
-
-        InterfaceStyle.current = .standard
-        column.applyInterfaceStyle()
-        column.view.layoutSubtreeIfNeeded()
-        for restored in [split, stack, close, follow, stop] { XCTAssertFalse(restored.isHidden, restored.title) }
-        XCTAssertTrue(more.isHidden)
-        XCTAssertTrue(selection.isHidden)
-        XCTAssertEqual(column.stream.view.frame.maxY, standardStreamTop, accuracy: 0.5)
-        XCTAssertEqual(strip.convert(strip.bounds, to: column.view), standardStrip)
-        XCTAssertFalse(column.view.hasAmbiguousLayout)
+        column.display(chat)
+        for style in [InterfaceStyle.standard, .breathe, .standard] {
+            InterfaceStyle.current = style
+            column.applyInterfaceStyle(); column.view.layoutSubtreeIfNeeded()
+            let more = try XCTUnwrap(button("Chat options", in: column.view))
+            let row = more.convert(more.bounds, to: column.view)
+            let title = column.chatTitle.convert(column.chatTitle.bounds, to: column.view)
+            XCTAssertGreaterThanOrEqual(title.minY, row.maxY)
+            XCTAssertEqual(descendants(column.view).compactMap { $0 as? ChatTitleButton }.count, 1)
+            XCTAssertNil(column.chatTitle.enclosingScrollView)
+            XCTAssertFalse(descendants(column.view).contains { $0 is BreatheTabSelection })
+            XCTAssertFalse(column.view.hasAmbiguousLayout)
+        }
     }
 
     @MainActor
@@ -167,26 +121,28 @@ final class BreatheStyleTests: XCTestCase {
         defer { workspace.stopAll(); workspace.window?.close() }
         workspace.window?.setContentSize(NSSize(width: 1440, height: 900))
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
-        XCTAssertEqual(columns(workspace).count, 1)
+        XCTAssertEqual(columns(workspace).count, 3)
 
         workspace.splitStream(nil)
         workspace.stackStream(nil)
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
         let open = columns(workspace)
-        XCTAssertEqual(open.count, 3)
+        let created = open.compactMap { $0.session?.id }.filter { !chats.map(\.id).contains($0) }
+        defer { for id in created { try? FileManager.default.removeItem(at: Session.base.appendingPathComponent(id.uuidString)) } }
+        XCTAssertEqual(open.count, 5)
         for column in open {
             let host = try XCTUnwrap(column.view.superview as? TabSplitHostView)
             XCTAssertEqual(column.view.frame, host.bounds.insetBy(dx: PaneSurface.inset, dy: PaneSurface.inset))
             XCTAssertEqual(column.view.layer?.cornerRadius, PaneSurface.radius)
             XCTAssertFalse(column.view.hasAmbiguousLayout)
         }
-        XCTAssertEqual(open[0].tabIDs, chats.map(\.id))
+        XCTAssertEqual(Set(open.compactMap { $0.session?.id }).intersection(chats.map(\.id)), Set(chats.map(\.id)))
 
-        // The header keeps Settings immediately before Add Pane in every style.
+        // The header uses the same shortcut button treatment for all three actions.
         let content = try XCTUnwrap(workspace.window?.contentView)
         func addPane() throws -> NSButton {
             let frame = try XCTUnwrap(content.superview)
-            return try XCTUnwrap(descendants(frame).compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "Add Pane" })
+            return try XCTUnwrap(descendants(frame).compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "New Chat" })
         }
         func paneTop() -> CGFloat { content.bounds.maxY - open[0].view.convert(open[0].view.bounds, to: content).maxY }
         let frame = try XCTUnwrap(content.superview)
@@ -195,13 +151,23 @@ final class BreatheStyleTests: XCTestCase {
         let settingsFrame = settings.convert(settings.bounds, to: frame)
         let addFrame = try addPane().convert(addPane().bounds, to: frame)
         XCTAssertLessThan(settingsFrame.maxX, addFrame.minX)
-        XCTAssertGreaterThanOrEqual(frame.bounds.maxX - addFrame.maxX, 24)
+        XCTAssertEqual(frame.bounds.maxX - addFrame.maxX, 12, accuracy: 1)
         XCTAssertGreaterThanOrEqual(frame.bounds.maxY - addFrame.maxY, 12)
         XCTAssertFalse(descendants(try XCTUnwrap(settings.superview)).contains { $0 is NSProgressIndicator })
-        XCTAssertTrue(settings.isBordered)
-        XCTAssertEqual(settings.imagePosition, .imageLeading)
-        XCTAssertNotNil(settings.image)
-        XCTAssertEqual(try addPane().action, #selector(WorkspaceWindow.splitStream(_:)))
+        let settingsAction = try XCTUnwrap(settings as? AddPaneButton)
+        let newChat = try XCTUnwrap(button("New Chat", in: frame) as? AddPaneButton)
+        let addAction = try XCTUnwrap(try addPane() as? AddPaneButton)
+        XCTAssertEqual(settingsAction.symbolName, "gearshape")
+        XCTAssertEqual(settingsAction.shortcutTitle, "⌘,")
+        XCTAssertEqual(newChat.shortcutTitle, "⌘N")
+        XCTAssertEqual(addAction.shortcutTitle, "⌘N")
+        XCTAssertFalse(settingsAction.isIconOnly)
+        XCTAssertEqual(settingsAction.title, "Settings")
+        XCTAssertGreaterThanOrEqual(settingsAction.bounds.width, 136)
+        XCTAssertEqual(settingsAction.bounds.height, newChat.bounds.height)
+        XCTAssertEqual(settingsAction.bounds.height, addAction.bounds.height)
+        XCTAssertEqual(settingsAction.action, #selector(WorkspaceWindow.showSettings(_:)))
+        XCTAssertEqual(try addPane().action, #selector(WorkspaceWindow.newChat(_:)))
         XCTAssertTrue(try addPane().isDescendant(of: content))
         XCTAssertEqual(workspace.window?.titlebarAccessoryViewControllers.count, 0)
         let breatheTop = paneTop()
@@ -245,7 +211,7 @@ final class BreatheStyleTests: XCTestCase {
 
         workspace.closeFocusedPane(nil)
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
-        XCTAssertEqual(columns(workspace).count, 2)
-        XCTAssertEqual(columns(workspace)[0].tabIDs, chats.map(\.id))
+        XCTAssertEqual(columns(workspace).count, 4)
+        XCTAssertTrue(chats.allSatisfy { chat in columns(workspace).contains { $0.session === chat } })
     }
 }

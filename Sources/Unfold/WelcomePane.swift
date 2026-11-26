@@ -22,7 +22,7 @@ final class ComposerTextView: NSTextView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard string.isEmpty else { return }
-        placeholder.draw(at: NSPoint(x: textContainerInset.width + (textContainer?.lineFragmentPadding ?? 0), y: textContainerInset.height), withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 15), .foregroundColor: NSColor.placeholderTextColor])
+        placeholder.draw(at: NSPoint(x: textContainerInset.width + (textContainer?.lineFragmentPadding ?? 0), y: textContainerInset.height), withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 15), .foregroundColor: FeedPalette.muted])
     }
     override func didChangeText() { super.didChangeText(); needsDisplay = true }
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
@@ -64,9 +64,9 @@ final class WelcomePane: NSViewController {
         title.font = Typography.welcomeTitle; title.textColor = FeedPalette.text; title.alignment = .center
         let description = NSTextField(wrappingLabelWithString: "Chat with a clear, live view of progress, reasoning summaries, commands and results.")
         description.attributedStringValue = Typography.wrappingText(description.stringValue, font: Typography.conversation, color: FeedPalette.muted, alignment: .center)
-        let start = NSButton(title: "New chat", target: self, action: #selector(newChat)); start.bezelStyle = .rounded
+        let start = ThemedButton(title: "New chat", target: self, action: #selector(newChat)); start.bezelStyle = .rounded
         start.bezelColor = .controlAccentColor
-        let project = NSButton(title: "Open project…", target: self, action: #selector(openProject)); project.bezelStyle = .rounded
+        let project = ThemedButton(title: "Open project…", target: self, action: #selector(openProject)); project.bezelStyle = .rounded
         for button in [start, project] { button.font = Typography.interface }
         let actions = NSStackView(views: [start, project]); actions.orientation = .horizontal; actions.alignment = .centerY; actions.spacing = 12
         let note = NSTextField(wrappingLabelWithString: "Use Codex with ChatGPT or your signed-in Claude Code account.\nChats and shared activity are saved on this Mac.")
@@ -80,6 +80,7 @@ final class WelcomePane: NSViewController {
         }
         NSLayoutConstraint.activate([stack.centerXAnchor.constraint(equalTo: view.centerXAnchor), stack.centerYAnchor.constraint(equalTo: view.centerYAnchor), stack.widthAnchor.constraint(lessThanOrEqualToConstant: 440), stack.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24), stack.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -24), icon.heightAnchor.constraint(equalToConstant: 44), icon.widthAnchor.constraint(equalToConstant: 48)])
     }
+    override func viewDidAppear() { super.viewDidAppear(); InterfaceTypography.apply(to: view) }
     @objc private func newChat() { onNewChat?() }
     @objc private func openProject() { onOpenProject?() }
 }

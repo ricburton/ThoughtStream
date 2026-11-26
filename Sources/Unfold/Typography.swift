@@ -4,6 +4,8 @@ enum Typography {
     // SF Pro keeps native controls and custom-drawn content on the same scale.
     static let interface = NSFont.systemFont(ofSize: 13)
     static let interfaceEmphasis = NSFont.systemFont(ofSize: 13, weight: .medium)
+    static let paneTitle = NSFont.systemFont(ofSize: 15, weight: .medium)
+    static let paneTitleUnselected = NSFont.systemFont(ofSize: 15)
     static let section = NSFont.systemFont(ofSize: 12, weight: .semibold)
     static let caption = NSFont.systemFont(ofSize: 12)
     static let metadata = NSFont.systemFont(ofSize: 11)

@@ -59,6 +59,36 @@ final class LocalModelDiscoveryTests: XCTestCase {
         XCTAssertEqual(models.map(\.name), ["publisher/chat/model.gguf"])
     }
 
+    func testDiskScanSkipsOtherAppsContainersAndProtectedLibraryFolders() throws {
+        let home = try fixture()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let containerStore = home.appendingPathComponent("Library/Containers/app.locallyai.Locally/Data/Library/app.locallyai.Locally/huggingface/models")
+        let groupStore = home.appendingPathComponent("Library/Group Containers/group.example.app/models")
+        let otherAppSupport = home.appendingPathComponent("Library/Application Support/OtherApp/models")
+        for store in [containerStore, groupStore, otherAppSupport] {
+            try write(Data("GGUFweights".utf8), "publisher/chat/model.gguf", root: store)
+            XCTAssertTrue(LocalModelDiskScanner.isProtectedAppDataPath(store, home: home))
+        }
+        // LM Studio pointing into another app's container must be skipped without touching it.
+        try writeJSON(["downloadsFolder": containerStore.path], ".lmstudio/settings.json", root: home)
+        XCTAssertTrue(LocalModelDiskScanner.models(for: .lmStudio, home: home, environment: [:]).isEmpty)
+
+        // Symlinked model files pointing into another app's container must also be skipped.
+        let localModels = home.appendingPathComponent(".lmstudio/models/publisher/chat")
+        try FileManager.default.createDirectory(at: localModels, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: localModels.appendingPathComponent("linked.gguf"),
+            withDestinationURL: containerStore.appendingPathComponent("publisher/chat/model.gguf"))
+        XCTAssertTrue(LocalModelDiskScanner.models(for: .lmStudio, home: home, environment: [:]).isEmpty)
+
+        // OLLAMA_MODELS pointing into another app's container must be skipped too.
+        XCTAssertTrue(LocalModelDiskScanner.models(for: .ollama, home: home, environment: ["OLLAMA_MODELS": groupStore.path]).isEmpty)
+
+        // ThoughtStream's own Application Support folder stays allowed.
+        let own = home.appendingPathComponent("Library/Application Support/ThoughtStream/Inkling")
+        XCTAssertFalse(LocalModelDiskScanner.isProtectedAppDataPath(own, home: home))
+    }
+
     func testDiskScanDoesNotFollowDirectoryLinksOrInspectUnrelatedFolders() throws {
         let root = try fixture(), elsewhere = try fixture()
         defer { try? FileManager.default.removeItem(at: root); try? FileManager.default.removeItem(at: elsewhere) }

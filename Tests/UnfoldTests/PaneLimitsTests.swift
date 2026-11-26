@@ -21,26 +21,26 @@ final class PaneLimitsTests: XCTestCase {
     }
 
     func testMinimumBreathesWithTheDisplayAndStopsAtTheCompactFloor() {
-        // A big display shares its width between ten columns and its height between five rows.
+        // A big display shares its width between five columns and its height between five rows.
         let large = PaneLayout.adaptiveMinimum(viewport: NSSize(width: 3409, height: 1404))
-        XCTAssertEqual(large.width, 340)
+        XCTAssertEqual(large.width, 681)
         XCTAssertEqual(large.height, 280)
         // A cramped one stops at the compact floor instead of an unreadable sliver.
-        let small = PaneLayout.adaptiveMinimum(viewport: NSSize(width: 1100, height: 700))
+        let small = PaneLayout.adaptiveMinimum(viewport: NSSize(width: 800, height: 700))
         XCTAssertEqual(small, PaneLayout.compactPaneSize)
         XCTAssertLessThan(PaneLayout.compactPaneSize.width, PaneLayout.minimumPaneSize.width)
         // Rounded panes spend their inset from the same share.
-        XCTAssertEqual(PaneLayout.adaptiveMinimum(viewport: NSSize(width: 3409, height: 1404), paneInset: 8).width, 324)
+        XCTAssertEqual(PaneLayout.adaptiveMinimum(viewport: NSSize(width: 3409, height: 1404), paneInset: 8).width, 665)
         XCTAssertEqual(PaneLayout.adaptiveMinimum(viewport: .zero), PaneLayout.compactPaneSize)
     }
 
-    func testTenColumnsFitAndTheEleventhScrolls() {
+    func testFiveColumnsFitAndTheSixthScrolls() {
         let viewport = NSSize(width: 2600, height: 1200)
         let minimum = PaneLayout.adaptiveMinimum(viewport: viewport)
         func columns(_ count: Int) -> PaneLayout { PaneLayout.arranged((0..<count).map { _ in UUID() }, as: .columns)! }
-        XCTAssertLessThanOrEqual(columns(10).minimumSize(paneInset: 0, paneMinimum: minimum).width, viewport.width)
-        XCTAssertGreaterThan(columns(11).minimumSize(paneInset: 0, paneMinimum: minimum).width, viewport.width)
-        XCTAssertLessThanOrEqual(columns(11).minimumSize(paneInset: 0, paneMinimum: minimum).height, viewport.height)
+        XCTAssertLessThanOrEqual(columns(5).minimumSize(paneInset: 0, paneMinimum: minimum).width, viewport.width)
+        XCTAssertGreaterThan(columns(6).minimumSize(paneInset: 0, paneMinimum: minimum).width, viewport.width)
+        XCTAssertLessThanOrEqual(columns(6).minimumSize(paneInset: 0, paneMinimum: minimum).height, viewport.height)
     }
 
     func testArrangementsKeepEveryPaneInOrder() {
@@ -140,11 +140,11 @@ final class PaneLimitsTests: XCTestCase {
         for view in layout.paneViews { XCTAssertEqual(view.frame.width, roomy.width, accuracy: 1) }
         narrow.view.layoutSubtreeIfNeeded()
         XCTAssertEqual(narrow.density, .regular)
-        XCTAssertTrue(canvas.overflows.horizontal, "Fourteen columns still scroll: ten share the pane area")
-        // Ten columns fit without scrolling.
-        let ten = Array(ids.prefix(10))
+        XCTAssertTrue(canvas.overflows.horizontal, "Fourteen columns still scroll: five share the pane area")
+        // Five columns fit without scrolling.
+        let five = Array(ids.prefix(5))
         for column in columns.values { column.view.removeFromSuperview(); column.removeFromParent() }
-        canvas.setLayout(PaneLayoutController(layout: PaneLayout.arranged(ten, as: .columns)!, columns: columns,
+        canvas.setLayout(PaneLayoutController(layout: PaneLayout.arranged(five, as: .columns)!, columns: columns,
                                               configureHost: { _, _ in }, resized: {}))
         window.contentView?.layoutSubtreeIfNeeded()
         canvas.fit()
@@ -180,7 +180,7 @@ final class PaneLimitsTests: XCTestCase {
         XCTAssertEqual(window.minSize, NSSize(width: 860, height: 600))
         let last = try XCTUnwrap(current.last)
         func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
-        let stack = try XCTUnwrap(views(last.view).compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "Stack pane below" })
+        let stack = try XCTUnwrap(views(last.view).compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "Split below" })
         XCTAssertTrue(stack.isEnabled)
         let menu = NSMenuItem(title: "Stack", action: #selector(WorkspaceWindow.stackStream(_:)), keyEquivalent: "")
         XCTAssertTrue(workspace.validateMenuItem(menu))

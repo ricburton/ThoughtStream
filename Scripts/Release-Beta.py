@@ -144,6 +144,8 @@ def publish(output, archive, appcast, tag, version, build, previous_sha, tools):
     notes = output / "release-notes.md"
     notes.write_text(f"""ThoughtStream {version} beta (build {build})
 
+ThoughtStream is a native Mac workspace for coding agents. Open a project folder and follow commands, edits, and replies in one feed. Keep several chats open side by side while you work.
+
 For Apple Silicon Macs running macOS 14 or later.
 
 1. Download `{archive.name}` and unzip it.
@@ -175,6 +177,8 @@ Report problems at https://github.com/{REPOSITORY}/issues. Avoid including priva
     run("gh", "api", "--method", "PUT", f"repos/{REPOSITORY}/contents/appcast.xml", "--input", request,
         "--jq", ".commit.html_url")
     readme = f"""# ThoughtStream Beta
+
+ThoughtStream lets you work with coding agents in a native Mac app. Open a project folder, ask about its code and follow commands, edits and replies as they happen. Each conversation keeps its draft and reading position on your Mac.
 
 [Download ThoughtStream {version} Beta ({build})](https://github.com/{REPOSITORY}/releases/download/{tag}/{archive.name})
 

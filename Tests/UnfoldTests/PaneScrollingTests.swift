@@ -26,18 +26,18 @@ final class PaneScrollingTests: XCTestCase {
     }
 
     @MainActor
-    func testEveryPaneSurfaceScrollsBothWaysAndNestedContentHandsOffAtEdges() throws {
-        let columns = (0..<12).map { _ in ChatColumn() }
+    func testSixPanesScrollBothWaysAndNestedContentHandsOffAtEdges() throws {
+        let columns = (0..<6).map { _ in ChatColumn() }
         let layout = PaneLayoutController(layout: PaneLayout.arranged(columns.map(\.columnID), as: .columns)!,
             columns: Dictionary(uniqueKeysWithValues: columns.map { ($0.columnID, $0) }),
             configureHost: { _, _ in }, resized: {})
         let canvas = PaneCanvasController()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 2600, height: 700),
             styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentViewController = canvas
         defer { window.close() }
-        window.setContentSize(NSSize(width: 1000, height: 700))
+        window.setContentSize(NSSize(width: 2600, height: 700))
         canvas.setLayout(layout)
         window.contentView?.layoutSubtreeIfNeeded()
         canvas.fit()

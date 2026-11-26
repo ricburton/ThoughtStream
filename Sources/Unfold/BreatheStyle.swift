@@ -81,43 +81,6 @@ enum Breathe {
         layer.add(fade, forKey: "breatheFade")
     }
 
-    /// Leave a fading picture of a closing pane where it was, so its
-    /// neighbours appear to take over the space rather than jump into it.
-    /// Call before the pane leaves its window.
-    @MainActor static func popClosed(_ pane: NSView, over container: NSView) {
-        guard InterfaceStyle.isBreathe, !reducesMotion, pane.window != nil, container.window === pane.window,
-              pane.bounds.width > 0, pane.bounds.height > 0,
-              let bitmap = pane.bitmapImageRepForCachingDisplay(in: pane.bounds) else { return }
-        pane.cacheDisplay(in: pane.bounds, to: bitmap)
-        let image = NSImage(size: pane.bounds.size)
-        image.addRepresentation(bitmap)
-        let ghost = PaneGhostView(frame: container.convert(pane.bounds, from: pane))
-        ghost.image = image
-        container.addSubview(ghost)
-        let end = ghost.frame.insetBy(dx: ghost.frame.width * 0.03, dy: ghost.frame.height * 0.03)
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.2
-            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0, 1, 1)
-            ghost.animator().frame = end
-            ghost.animator().alphaValue = 0
-        }, completionHandler: { ghost.removeFromSuperview() })
-    }
-}
-
-/// A picture of a pane that is on its way out. Never interactive.
-@MainActor
-private final class PaneGhostView: NSImageView {
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        imageScaling = .scaleAxesIndependently
-        wantsLayer = true
-        layer?.cornerRadius = PaneSurface.radius
-        layer?.cornerCurve = .continuous
-        layer?.masksToBounds = true
-        setAccessibilityElement(false)
-    }
-    required init?(coder: NSCoder) { fatalError("Not implemented") }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 /// The selected tab's surface. It lives behind the tabs and slides between
@@ -171,7 +134,7 @@ final class FeedLatestPill: NSButton {
     required init?(coder: NSCoder) { fatalError("Not implemented") }
 
     private var label: NSAttributedString {
-        NSAttributedString(string: "Latest", attributes: [.font: Typography.caption,
+        NSAttributedString(string: "Latest", attributes: [.font: InterfaceTypography.font(Typography.caption),
             .foregroundColor: isHighlighted ? FeedPalette.text : FeedPalette.muted])
     }
     override var intrinsicContentSize: NSSize {

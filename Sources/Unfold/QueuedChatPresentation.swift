@@ -18,8 +18,8 @@ enum QueuedChatPresentation {
         let style = NSMutableParagraphStyle()
         style.paragraphSpacing = 7; style.paragraphSpacingBefore = 3
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: Typography.section,
-            .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: style
+            .font: InterfaceTypography.font(Typography.section),
+            .foregroundColor: FeedPalette.muted, .paragraphStyle: style
         ]
         let result = NSMutableAttributedString(string: "  Queued Chat  ", attributes: attributes)
         result.addAttribute(.queuedChatBubble, value: true, range: NSRange(location: 0, length: result.length))

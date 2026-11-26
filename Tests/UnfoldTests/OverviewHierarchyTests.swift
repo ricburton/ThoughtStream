@@ -3,6 +3,33 @@ import XCTest
 @testable import ThoughtStream
 
 final class OverviewHierarchyTests: XCTestCase {
+    @MainActor
+    func testRepeatedOverviewLabelsAreShownOnceWithoutRemovingDistinctContent() throws {
+        for kind in ["Reasoning", "Output", "Session", "Image", "Error", "You"] {
+            var entry = FeedHighlight(record: 0, kind: kind, title: kind, summary: "Specific content stays visible.")
+            XCTAssertFalse(entry.showsOverviewBadge)
+            XCTAssertEqual(entry.overviewAccessibilityLabel, kind)
+            XCTAssertEqual(entry.overviewDetail, entry.summary)
+            let cell = FeedOverviewCell(entry: entry)
+            XCTAssertEqual(cell.accessibilityLabel(), kind)
+            XCTAssertEqual(cell.toolTip, "\(kind)\nSpecific content stays visible.")
+            XCTAssertTrue(try XCTUnwrap(cell.subviews.first { $0 is FeedTypeBadge }).isHidden)
+            entry.title = "\(kind) about this task"
+            XCTAssertTrue(entry.showsOverviewBadge, "Shared words are not duplicate labels")
+            XCTAssertFalse(cell.update(entry), "Adding a distinct badge requires updated layout")
+            entry.summary = entry.title
+            XCTAssertEqual(entry.overviewDetail, "")
+        }
+        let normalized = FeedHighlight(record: 0, kind: "Reasoning", title: " reasoning \n", summary: "REASONING")
+        XCTAssertFalse(normalized.showsOverviewBadge)
+        XCTAssertTrue(normalized.overviewDetail.isEmpty)
+        let command = FeedHighlight(record: 1, kind: "Command", title: "Command", summary: "echo hello", command: CommandActivity(state: .running, startedAt: Date()), commandText: "echo hello")
+        XCTAssertTrue(command.showsOverviewMetadata, "Elapsed time must remain visible")
+        XCTAssertEqual(command.overviewDetail, "echo hello")
+        var caseSensitive = command
+        caseSensitive.summary = "echo HELLO"
+        XCTAssertEqual(caseSensitive.overviewDetail, "echo HELLO\necho hello")
+    }
     func testAuthoredArtifactsStandOutFromMatchingReadback() throws {
         let code = "```swift\nstruct Greeting {}\n```"
         let authored = FeedHighlightIndex.entries(for: StreamRecord(kind: "Agent", text: code), at: 0)
@@ -24,7 +51,7 @@ final class OverviewHierarchyTests: XCTestCase {
         let removal = try XCTUnwrap(FeedHighlightIndex.entries(for: StreamRecord(kind: "File change", text: "--- a/Old.swift\n+++ /dev/null\n-struct Old {}"), at: 0).first)
         XCTAssertFalse(removal.freshCode)
         XCTAssertEqual(removal.prominence, .created)
-        XCTAssertEqual(removal.overviewBadge, "File changes")
+        XCTAssertEqual(removal.overviewBadge, "Project changes")
         let error = FeedHighlight(record: 1, kind: "Error", title: "Failed", summary: "Could not save")
         XCTAssertEqual(error.prominence, .error)
         let command = FeedHighlight(record: 2, kind: "Command", title: "Run tests", summary: "Failed", command: CommandActivity(state: .failed, startedAt: Date(), exitCode: 1))
@@ -60,9 +87,20 @@ final class OverviewHierarchyTests: XCTestCase {
     }
 
     @MainActor
+    func testScrollMaskDoesNotCutSelectionOutlineCorners() throws {
+        let navigator = FeedHighlightsView(frame: NSRect(x: 0, y: 0, width: 210, height: 600))
+        let clip = try XCTUnwrap(navigator.subviews.compactMap { $0 as? NSScrollView }.first?.contentView)
+        XCTAssertEqual(clip.layer?.masksToBounds, true)
+        // The first and last rows sit in the mask's corners. A mask rounder
+        // than the row's own corner shaves the selection outline there.
+        XCTAssertEqual(clip.layer?.cornerRadius, FeedOverviewRow.cornerRadius)
+    }
+
+    @MainActor
     func testHierarchyRendersAtNarrowWidthInBothAppearances() throws {
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
-            let root = OverviewPreviewBackground(frame: NSRect(x: 0, y: 0, width: 210, height: 400))
+            let height = fixture().reduce(CGFloat(0)) { $0 + $1.overviewHeight + 4 }
+            let root = OverviewPreviewBackground(frame: NSRect(x: 0, y: 0, width: 210, height: height))
             let window = NSWindow(contentRect: root.frame, styleMask: [.borderless], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
             window.contentView = root
@@ -92,7 +130,9 @@ final class OverviewHierarchyTests: XCTestCase {
         [FeedHighlight(record: 0, kind: "Command", title: "Read files", summary: "Inspect existing source", commandText: "cat Sources/Greeting.swift"),
          FeedHighlight(record: 1, kind: "Changes", title: "GreetingView.swift", summary: "12 added · 2 removed\nAdded: struct GreetingView", freshCode: true),
          FeedHighlight(record: 2, kind: "HTML", title: "Greeting preview", summary: "Rendered page and source", createdOutput: true),
-         FeedHighlight(record: 3, kind: "Reply", title: "Final answer", summary: "Created the view and verified the focused checks.")]
+         FeedHighlight(record: 3, kind: "Reply", title: "Final answer", summary: "Created the view and verified the focused checks."),
+         FeedHighlight(record: 4, kind: "Reasoning", title: "Reasoning", summary: "Check the smallest change against the existing tests."),
+         FeedHighlight(record: 5, kind: "Output", title: "Output", summary: "Build succeeded.")]
     }
 }
 

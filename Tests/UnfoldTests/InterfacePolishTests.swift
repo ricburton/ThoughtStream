@@ -84,6 +84,19 @@ final class InterfacePolishTests: XCTestCase {
             for button in buttons {
                 XCTAssertTrue(root.bounds.contains(button.convert(button.bounds, to: root)), "Clipped settings action: \(button.title)")
             }
+            if let directory = ProcessInfo.processInfo.environment["THOUGHTSTREAM_SETTINGS_PREVIEW"] {
+                let url = URL(fileURLWithPath: directory)
+                try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+                    window.appearance = NSAppearance(named: appearance)
+                    root.layoutSubtreeIfNeeded()
+                    let bitmap = try XCTUnwrap(root.bitmapImageRepForCachingDisplay(in: root.bounds))
+                    root.cacheDisplay(in: root.bounds, to: bitmap)
+                    let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                    try data.write(to: url.appendingPathComponent("settings-\(page)-\(name).png"))
+                }
+                window.appearance = nil
+            }
         }
     }
 

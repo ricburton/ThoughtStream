@@ -95,14 +95,23 @@ enum FeedSummary {
         switch json {
         case .object(let fields):
             let names = fields.map(\.0).filter { !["id", "threadId", "turnId", "_meta", "title"].contains($0) }
-            let values = fields.filter { names.contains($0.0) }.prefix(3).map { key, value in
+            // Surface the outcome before incidental payload fields while
+            // retaining source order among equally important fields.
+            let priority = ["error", "isError", "status", "success", "summary", "message", "result", "count", "total"]
+            let ordered = fields.enumerated().filter { names.contains($0.element.0) }.sorted {
+                let lhs = priority.firstIndex(of: $0.element.0) ?? priority.count
+                let rhs = priority.firstIndex(of: $1.element.0) ?? priority.count
+                return lhs == rhs ? $0.offset < $1.offset : lhs < rhs
+            }
+            let values = ordered.prefix(3).map { _, field in
+                let (key, value) = field
                 let description: String
                 switch value {
                 case .string(let text): description = short(text)
                 case .number(let number): description = number
                 case .boolean(let flag): description = flag ? "yes" : "no"
                 case .array(let items): description = "\(items.count) items"
-                case .object(let fields): description = "\(fields.count) fields"
+                case .object(let fields): description = value["message"]?.string.map(short) ?? "\(fields.count) fields"
                 case .null: description = "none"
                 }
                 return "\(key): \(description)"

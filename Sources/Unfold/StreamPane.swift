@@ -11,6 +11,8 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
     private var repositoryRefreshPending = false
     private let follow = NSButton(checkboxWithTitle: "Follow live", target: nil, action: nil)
     private let controlBar = ChatControlBar()
+    private var statusRow: NSStackView?
+    private var headerActions: NSView?
     private var barHeight: NSLayoutConstraint!
     private let latestPill = FeedLatestPill()
     private var lastUserScroll: TimeInterval = 0
@@ -87,7 +89,7 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
         loadViewIfNeeded()
         // Matrix leaves the feed transparent over its rain.
         table.backgroundColor = InterfaceStyle.isMatrix ? .clear : color
-        (view.subviews.first { $0 is ChatControlBar } as? ChatControlBar)?.fill = color
+        controlBar.fill = FeedPalette.chatControls
     }
     override func loadView() {
         let container = FeedResizeContainer()
@@ -108,9 +110,6 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
         scroll.onScrollUp = { [weak self] in self?.userScrollIsUpward = true; self?.resetResizeAnchor(); self?.clearLiveFocus(); self?.scrollMotion.cancel(); self?.follow.state = .off; self?.publishViewState() }
         scroll.contentView.postsBoundsChangedNotifications = true
         highlights.onJump = { [weak self] in self?.jump(to: $0) }
-        highlights.onLatest = { [weak self] in
-            self?.resumeLiveActivity()
-        }
         positionObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 if let self, !self.resizing, self.resizeAnchorExpiry == nil, self.follow.state == .off {
@@ -166,6 +165,7 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
         sizeButton.widthAnchor.constraint(equalToConstant: 30).isActive = true
         let bar = NSStackView(views: [status, repository, NSView(), selection, sizes, follow])
         bar.orientation = .horizontal; bar.alignment = .centerY; bar.spacing = 8
+        statusRow = bar
         let rows = NSStackView(views: [bar, searchRow])
         rows.orientation = .vertical; rows.alignment = .leading; rows.spacing = 6
         controlBar.setAccessibilityElement(true)
@@ -201,15 +201,24 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
 
     // MARK: Breathe
 
+    /// The pane owns its actions; the feed places them beside live status and branch.
+    func installHeaderActions(_ actions: NSView) {
+        loadViewIfNeeded()
+        if let headerActions { statusRow?.removeArrangedSubview(headerActions); headerActions.removeFromSuperview() }
+        headerActions = actions
+        statusRow?.addArrangedSubview(actions)
+        applyChrome()
+    }
+
     /// Breathe leaves only the status line here. Text size, find, asking about
     /// a selection and following are offered by the pane's menu instead.
     private func applyChrome() {
         let breathe = InterfaceStyle.isBreathe, compact = density.hasCompactChrome
-        textSizeControls.isHidden = compact || breathe
-        selectionButton?.isHidden = compact || breathe
-        follow.isHidden = breathe
-        controlBar.drawsBorder = !breathe
-        barHeight.constant = breathe ? Breathe.statusHeight : PaneSpacing.controlHeight
+        textSizeControls.isHidden = compact || breathe || headerActions != nil
+        selectionButton?.isHidden = compact || breathe || headerActions != nil
+        follow.isHidden = breathe || headerActions != nil
+        controlBar.drawsBorder = true
+        barHeight.constant = headerActions != nil ? 30 : breathe ? Breathe.statusHeight : PaneSpacing.controlHeight
         refreshNavigatorVisibility()
         refreshLatestPill()
     }
@@ -336,13 +345,14 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
         let text = NSMutableAttributedString()
         if let symbol = NSImage(systemSymbolName: location.worktree == nil ? "arrow.triangle.branch" : "square.stack.3d.up", accessibilityDescription: nil) {
             let attachment = NSTextAttachment(); attachment.image = symbol
-            let font = Typography.caption
+            let font = InterfaceTypography.font(Typography.caption)
             attachment.bounds = NSRect(x: 0, y: font.descender + 1, width: font.pointSize, height: font.pointSize)
             text.append(NSAttributedString(attachment: attachment)); text.append(NSAttributedString(string: " "))
         }
         text.append(NSAttributedString(string: location.summary))
         text.addAttributes([.font: Typography.caption, .foregroundColor: FeedPalette.muted], range: NSRange(location: 0, length: text.length))
         repository.attributedStringValue = text
+        InterfaceTypography.apply(to: repository)
         repository.toolTip = "\(location.isDetached ? "Detached HEAD" : "Branch") \(location.branch)" +
             (location.worktree.map { " in worktree \($0)" } ?? "") + "\n" + location.root.path + "\nFollows the folder the agent last worked in"
         repository.setAccessibilityLabel((location.worktree == nil ? "Branch " : "Worktree branch ") + location.summary)
@@ -447,7 +457,7 @@ final class StreamPane: NSViewController, NSTableViewDataSource, NSTableViewDele
             let key = reference.source
             imageRows[key, default: []].insert(row)
             if imageFailures.contains(key) {
-                value[index] = .text(NSAttributedString(string: "Image unavailable", attributes: [.font: NSFont.systemFont(ofSize: renderSize), .foregroundColor: NSColor.secondaryLabelColor])); continue
+                value[index] = .text(NSAttributedString(string: "Image unavailable", attributes: [.font: NSFont.systemFont(ofSize: renderSize), .foregroundColor: FeedPalette.muted])); continue
             }
             guard images[key] == nil, pendingImages.insert(key).inserted else { continue }
             let project = projectDirectory, generation = viewStateGeneration

@@ -15,9 +15,12 @@ struct ChatAttachment: Codable, Equatable, Identifiable, Sendable {
 
     enum Source: Sendable { case file(URL), data(Data) }
 
+    private static var imageReadingOptions: [NSPasteboard.ReadingOptionKey: Any] {
+        [.urlReadingFileURLsOnly: true, .urlReadingContentsConformToTypes: [UTType.image.identifier]]
+    }
+
     static func sources(from pasteboard: NSPasteboard) -> [Source] {
-        let files = (pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
-            .filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image) == true }
+        let files = pasteboard.readObjects(forClasses: [NSURL.self], options: imageReadingOptions) as? [URL] ?? []
         if !files.isEmpty { return files.map(Source.file) }
         for type in [NSPasteboard.PasteboardType.png, .tiff] {
             if let data = pasteboard.data(forType: type) { return [.data(data)] }
@@ -27,8 +30,10 @@ struct ChatAttachment: Codable, Equatable, Identifiable, Sendable {
 
     static func accepts(_ pasteboard: NSPasteboard) -> Bool {
         if pasteboard.availableType(from: [.png, .tiff]) != nil { return true }
-        return (pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
-            .contains { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image) == true }
+        // Drag validation and paste availability should inspect types without
+        // retrieving clipboard contents. Read the data only in sources(from:)
+        // once the user actually pastes or drops it.
+        return pasteboard.canReadObject(forClasses: [NSURL.self], options: imageReadingOptions)
     }
 
     /// Keep a private, normalized copy so moving the original does not break a draft.

@@ -71,6 +71,7 @@ private final class PaneSplitView: NSSplitView {
 private final class PaneLayoutFrameView: NSView {
     var didLayout: (() -> Void)?
     override func setFrameSize(_ newSize: NSSize) {
+        guard newSize != frame.size else { return }
         super.setFrameSize(newSize)
         needsLayout = true
     }
@@ -118,14 +119,25 @@ final class PaneLayoutController: NSViewController {
     private weak var layoutParent: PaneLayoutController?
     private var fraction: Double = 0.5
     private var laneWeights: [CGFloat]?
-    private var paneEdges: [NSLayoutConstraint] = []
+    private var firstExtent: NSLayoutConstraint?
     private let resized: () -> Void
     private var arranging = false
     private var lastSize = NSSize.zero
+    /// Completed arrangements let a canvas growth request detect that its
+    /// callback already laid out the tree, without repeating the same work.
+    private(set) var layoutRevision: UInt64 = 0
     /// Set on the root by a scrolling pane area: the smallest size for every
     /// pane there. Without it a pane never goes below its comfortable minimum
     /// or its own fitting size.
     var paneMinimum: NSSize?
+    /// Explicit divider drags may ask the scrolling canvas for more room.
+    var requestCanvasExtent: ((Bool, CGFloat) -> Void)?
+    /// Set on the root by a scrolling pane area. A column divider then sizes
+    /// one column and the canvas takes exactly the width the columns need.
+    var resizeCanvasWidth: ((CGFloat) -> Void)?
+    /// The width columns must still cover; zero when they may occupy less.
+    var columnFillWidth: (() -> CGFloat)?
+    var beginManualResize: (() -> Void)?
 
     init(layout: PaneLayout, columns: [UUID: ChatColumn], configureHost: (TabSplitHostView, ChatColumn) -> Void,
          resized: @escaping () -> Void) {
@@ -141,15 +153,13 @@ final class PaneLayoutController: NSViewController {
             column.removeFromParent()
             column.view.removeFromSuperview()
             addChild(column)
-            column.view.translatesAutoresizingMaskIntoConstraints = false
+            // The split tree owns host geometry. Keep the expensive column's
+            // frame independent until that geometry has settled for this pass.
+            host.autoresizesSubviews = false
+            host.onLayout = { [weak self] in self?.resizeIfNeeded() }
+            column.view.translatesAutoresizingMaskIntoConstraints = true
+            column.view.autoresizingMask = []
             host.addSubview(column.view, positioned: .below, relativeTo: nil)
-            paneEdges = [
-                column.view.leadingAnchor.constraint(equalTo: host.leadingAnchor),
-                column.view.trailingAnchor.constraint(equalTo: host.trailingAnchor),
-                column.view.topAnchor.constraint(equalTo: host.topAnchor),
-                column.view.bottomAnchor.constraint(equalTo: host.bottomAnchor)
-            ]
-            NSLayoutConstraint.activate(paneEdges)
         case .split(let vertical, let value, let first, let second):
             buildSplit(vertical: vertical, fraction: value)
             for child in [first, second] {
@@ -212,7 +222,8 @@ final class PaneLayoutController: NSViewController {
     /// Add a pane beside an existing one without rebuilding the tree. Every
     /// other pane keeps its views and its layout, so this stays quick however
     /// many panes there are. Returns false when the tree must be rebuilt
-    /// instead (the target is the only pane). Follow with `balance()`.
+    /// instead (the target is the only pane). Follow with `balance()` or restore
+    /// captured widths when the user has sized the workspace themselves.
     func insertPane(_ column: ChatColumn, beside target: UUID, vertical: Bool, leading: Bool,
                     configureHost: (TabSplitHostView, ChatColumn) -> Void) -> Bool {
         guard layoutParent == nil, let existing = leaf(target), let parent = existing.layoutParent,
@@ -227,6 +238,33 @@ final class PaneLayoutController: NSViewController {
         container.insertSplitViewItem(NSSplitViewItem(viewController: node), at: index)
         equalizeWeights()
         return true
+    }
+
+    /// Restore measured host widths after insertion, before fitting the canvas.
+    /// Vertical stacks share a width; horizontal lanes each keep their own.
+    /// Return the required space so the caller can scroll instead of squeezing.
+    func preserveWidths(_ widths: [UUID: CGFloat]) -> CGFloat {
+        var measured: [ObjectIdentifier: CGFloat] = [:]
+        func measure(_ node: PaneLayoutController) -> CGFloat {
+            let width: CGFloat
+            if let vertical = node.axis {
+                let first = measure(node.branches[0]), second = measure(node.branches[1])
+                width = vertical ? first + node.divider + second : max(first, second)
+            } else if case .pane(let id) = node.model {
+                width = widths[id] ?? node.view.bounds.width
+            } else { width = node.view.bounds.width }
+            measured[ObjectIdentifier(node)] = width
+            return width
+        }
+        let required = measure(self)
+        func apply(_ node: PaneLayoutController) {
+            if node.axis == true {
+                node.laneWeights = node.lanes(along: true).map { measured[ObjectIdentifier($0)]! }
+            }
+            node.branches.forEach(apply)
+        }
+        apply(self)
+        return required
     }
 
     /// Remove a pane in place; its sibling takes over their shared space.
@@ -255,13 +293,17 @@ final class PaneLayoutController: NSViewController {
     }
     private var divider: CGFloat { split?.splitView.dividerThickness ?? 1 }
     var minimumSize: NSSize {
+        minimumSize(paneMinimum: root.paneMinimum)
+    }
+    func minimumSize(paneMinimum: NSSize?) -> NSSize {
         if let vertical = axis {
-            let a = branches[0].minimumSize, b = branches[1].minimumSize
+            let a = branches[0].minimumSize(paneMinimum: paneMinimum)
+            let b = branches[1].minimumSize(paneMinimum: paneMinimum)
             return vertical ? NSSize(width: a.width + b.width + divider, height: max(a.height, b.height))
                 : NSSize(width: max(a.width, b.width), height: a.height + b.height + divider)
         }
         let inset = InterfaceStyle.hasRoundedPanes ? 2 * PaneSurface.inset : 0
-        if let minimum = root.paneMinimum {
+        if let minimum = paneMinimum {
             // Panes compact their own chrome and text to fit this floor.
             return NSSize(width: minimum.width + inset, height: minimum.height + inset)
         }
@@ -282,10 +324,7 @@ final class PaneLayoutController: NSViewController {
     }
 
     func applyInterfaceStyle() {
-        let inset = InterfaceStyle.hasRoundedPanes ? PaneSurface.inset : 0
-        for (index, edge) in paneEdges.enumerated() {
-            edge.constant = index == 0 || index == 2 ? inset : -inset
-        }
+        if split == nil { fitPaneContents() }
         view.needsDisplay = true
         split?.splitView.needsDisplay = true
         branches.forEach { $0.applyInterfaceStyle() }
@@ -300,39 +339,35 @@ final class PaneLayoutController: NSViewController {
         // Resize observers can synchronously post another window resize. Keep
         // the guard through that callback, not just through the divider layout.
         defer { owner.arranging = false }
+        // Hosts may pass through several intermediate sizes while nested
+        // dividers settle. Their columns keep their previous frames throughout.
         owner.view.layoutSubtreeIfNeeded()
-        // Placing a divider lays out everything beneath it, and a deep tree
-        // places one per level. Let the panes' contents sit out those passes
-        // and follow their hosts once, at the end: many panes stay quick.
-        owner.setPaneContentsFollowHosts(false)
         owner.layoutTree()
-        // Compact each pane for its new size before its contents rejoin the
-        // layout. A pane still wearing roomy chrome would push its dividers.
+        // The last nested divider may leave its first host waiting for a
+        // frame update. Flush host geometry before applying column frames.
+        owner.view.layoutSubtreeIfNeeded()
         owner.fitPaneContents()
-        owner.setPaneContentsFollowHosts(true)
         owner.view.layoutSubtreeIfNeeded()
         owner.lastSize = owner.view.bounds.size
+        owner.layoutRevision &+= 1
         owner.resized()
     }
 
     private func fitPaneContents() {
-        if split == nil, let column = children.first as? ChatColumn {
-            let inset = InterfaceStyle.hasRoundedPanes ? 2 * PaneSurface.inset : 0
-            let size = NSSize(width: view.bounds.width - inset, height: view.bounds.height - inset)
-            column.setDensity(PaneDensity.resolve(size: size, current: column.density))
+        if split == nil, let column = children.first as? ChatColumn,
+           view.bounds.width > 0, view.bounds.height > 0 {
+            let inset = InterfaceStyle.hasRoundedPanes ? PaneSurface.inset : 0
+            let frame = NSRect(x: inset, y: inset,
+                               width: max(0, view.bounds.width - 2 * inset),
+                               height: max(0, view.bounds.height - 2 * inset))
+            column.setDensity(PaneDensity.resolve(size: frame.size, current: column.density))
+            if column.view.frame != frame { column.view.frame = frame }
         }
         branches.forEach { $0.fitPaneContents() }
     }
 
     /// False until the tree has been laid out for its current size at least once.
     var isArranged: Bool { root.lastSize == root.view.bounds.size && root.lastSize != .zero }
-
-    private func setPaneContentsFollowHosts(_ follow: Bool) {
-        if split == nil {
-            if follow { NSLayoutConstraint.activate(paneEdges) } else { NSLayoutConstraint.deactivate(paneEdges) }
-        }
-        branches.forEach { $0.setPaneContentsFollowHosts(follow) }
-    }
 
     private func lanes(along vertical: Bool) -> [PaneLayoutController] {
         guard axis == vertical else { return [self] }
@@ -374,6 +409,19 @@ final class PaneLayoutController: NSViewController {
         let first = Array(lengths.prefix(count)), second = Array(lengths.dropFirst(count))
         let position = first.reduce(0, +) + CGFloat(count - 1) * divider
         fraction = extent > divider ? Double(position / (extent - divider)) : 0.5
+        // setPosition alone is only a request: nested split views can let their
+        // content constraints take the space back on the next layout pass.
+        // Keep the computed share authoritative, below the required outer size.
+        let firstView = branches[0].view
+        if firstExtent?.firstItem as? NSView !== firstView {
+            firstExtent?.isActive = false
+            firstExtent = vertical ? firstView.widthAnchor.constraint(equalToConstant: position)
+                : firstView.heightAnchor.constraint(equalToConstant: position)
+            firstExtent?.identifier = "paneFirstExtent"
+            firstExtent?.priority = .init(999)
+            firstExtent?.isActive = true
+        }
+        firstExtent?.constant = position
         splitView.placeDivider(position)
         view.layoutSubtreeIfNeeded()
         branches[0].placeRun(first, along: vertical)
@@ -396,6 +444,12 @@ final class PaneLayoutController: NSViewController {
     private func beginDividerDrag(at point: NSPoint) -> ((NSPoint) -> Void)? {
         let run = run
         guard let index = run.boundaryIndex(of: self) else { return nil }
+        if run.axis == true, root.resizeCanvasWidth != nil {
+            // Measure from where the drag began so it retraces exactly, and in
+            // window coordinates: the canvas can scroll as its width changes.
+            let widths = root.paneWidths()
+            return { [weak run] current in run?.resizeColumn(at: index, by: current.x - point.x, from: widths) }
+        }
         let grabOffset = run.coordinate(point) - dividerCoordinate(in: run)
         return { [weak run] point in
             guard let run else { return }
@@ -407,31 +461,119 @@ final class PaneLayoutController: NSViewController {
         guard let split, let first = split.splitView.subviews.first,
               let index = run.boundaryIndex(of: self) else { return }
         let firstLength = split.splitView.isVertical ? first.frame.width : first.frame.height
+        if run.axis == true, root.resizeCanvasWidth != nil {
+            run.resizeColumn(at: index, by: position - firstLength, from: root.paneWidths())
+            return
+        }
         run.redistribute(at: index, coordinate: dividerCoordinate(in: run) + position - firstLength)
     }
 
-    /// The grabbed boundary is pinned. All lanes before it share their space,
-    /// and all lanes after it share theirs. Matching runs in other rows/columns
-    /// use the same weights so a grid stays aligned while either axis is dragged.
+    /// Only the two lanes at the grabbed boundary trade space; a lane at its
+    /// minimum passes the remainder to the next one. Every other lane keeps its
+    /// size. Matching runs in other rows/columns use the same sizes so a grid
+    /// stays aligned while either axis is dragged.
     private func redistribute(at index: Int, coordinate: CGFloat) {
         let owner = root
         guard !owner.arranging, coordinate.isFinite, let vertical = axis else { return }
         let items = lanes(along: vertical)
         guard index > 0, index < items.count else { return }
-        let total = max(0, extent - CGFloat(items.count - 1) * divider)
+        // Measure before the canvas can grow and rescale every lane.
+        var lengths = items.map { vertical ? $0.view.bounds.width : $0.view.bounds.height }
+        owner.beginManualResize?()
         var minima = items.map { vertical ? $0.minimumSize.width : $0.minimumSize.height }
+        let requested = coordinate - CGFloat(index - 1) * divider
+        let available = max(0, extent - CGFloat(items.count - 1) * divider)
+        let extra = requested + minima.dropFirst(index).reduce(0, +) - available
+        if extra > 0, extent > 0, let request = owner.requestCanvasExtent {
+            let rootExtent = vertical ? owner.view.bounds.width : owner.view.bounds.height
+            request(vertical, rootExtent + extra * rootExtent / extent)
+        }
+        let total = max(0, extent - CGFloat(items.count - 1) * divider)
         let minimum = minima.reduce(0, +)
         if minimum > total { minima = minima.map { $0 * total / minimum } }
         let low = minima.prefix(index).reduce(0, +)
         let high = total - minima.dropFirst(index).reduce(0, +)
-        let before = min(high, max(low, coordinate - CGFloat(index - 1) * divider))
-        let weights = PaneSizing.shares(total: before, weights: Array(repeating: 1, count: index), minima: Array(minima.prefix(index)))
-            + PaneSizing.shares(total: total - before, weights: Array(repeating: 1, count: items.count - index), minima: Array(minima.dropFirst(index)))
+        let before = min(high, max(low, requested))
+        let change = before - lengths.prefix(index).reduce(0, +)
+        var owed = abs(change)
+        lengths[change >= 0 ? index - 1 : index] += owed
+        for lane in change >= 0 ? Array(index..<items.count) : Array((0..<index).reversed()) where owed > 0 {
+            let given = min(owed, max(0, lengths[lane] - minima[lane]))
+            lengths[lane] -= given
+            owed -= given
+        }
         // Match the axis span, not only the lane count: independent inset groups
         // must not move just because they happen to contain the same number.
         let span = axisSpan(in: owner)
-        owner.synchronizeRuns(along: vertical, span: span, weights: weights, in: owner)
+        owner.synchronizeRuns(along: vertical, span: span, weights: lengths, in: owner)
         owner.restoreFractions()
+    }
+
+    private func paneWidths() -> [ObjectIdentifier: CGFloat] {
+        guard split != nil else { return [ObjectIdentifier(self): view.bounds.width] }
+        return branches.reduce(into: [:]) { $0.merge($1.paneWidths()) { first, _ in first } }
+    }
+
+    /// A column divider sizes the column before it and nothing else: the
+    /// columns after it keep their widths and move, and the canvas grows or
+    /// shrinks to match. Only when the columns would stop covering the pane
+    /// area does the next column take up the slack. Aligned rows of a grid
+    /// follow; `delta` is measured from the widths in `start`.
+    private func resizeColumn(at index: Int, by delta: CGFloat, from start: [ObjectIdentifier: CGFloat]) {
+        let owner = root
+        let count = lanes(along: true).count
+        guard !owner.arranging, delta.isFinite, index > 0, index < count else { return }
+        owner.beginManualResize?()
+        let span = axisSpan(in: owner)
+        var resized = Set<ObjectIdentifier>(), following = Set<ObjectIdentifier>()
+        func findLanes(_ node: PaneLayoutController) {
+            if node.axis == true {
+                let items = node.lanes(along: true)
+                let ownSpan = node.axisSpan(in: owner)
+                if items.count == count, abs(ownSpan.0 - span.0) < 1, abs(ownSpan.1 - span.1) < 1 {
+                    resized.insert(ObjectIdentifier(items[index - 1]))
+                    following.insert(ObjectIdentifier(items[index]))
+                }
+                items.forEach(findLanes)
+            } else {
+                node.branches.forEach(findLanes)
+            }
+        }
+        findLanes(owner)
+        var widths: [ObjectIdentifier: CGFloat] = [:]
+        @discardableResult
+        func capture(_ node: PaneLayoutController, slack: CGFloat, extra: CGFloat = 0) -> CGFloat {
+            let id = ObjectIdentifier(node)
+            let addition = extra + (resized.contains(id) ? delta : 0) + (following.contains(id) ? slack : 0)
+            let width: CGFloat
+            if let vertical = node.axis {
+                let first = capture(node.branches[0], slack: slack, extra: vertical ? 0 : addition)
+                let second = capture(node.branches[1], slack: slack, extra: addition)
+                width = vertical ? first + node.divider + second : max(first, second)
+            } else {
+                let original = start[id] ?? node.view.bounds.width
+                width = addition < 0 ? max(min(original, node.minimumSize.width), original + addition)
+                    : original + addition
+            }
+            widths[id] = width
+            return width
+        }
+        var width = capture(owner, slack: 0)
+        let fill = owner.columnFillWidth?() ?? 0
+        if width < fill - 0.5 { width = capture(owner, slack: fill - width) }
+        func saveWidths(_ node: PaneLayoutController) {
+            if node.axis == true {
+                let items = node.lanes(along: true)
+                node.laneWeights = items.map { widths[ObjectIdentifier($0)]! }
+                items.forEach(saveWidths)
+            } else {
+                node.branches.forEach(saveWidths)
+            }
+        }
+        saveWidths(owner)
+        let revision = owner.layoutRevision
+        owner.resizeCanvasWidth?(width)
+        if owner.layoutRevision == revision { owner.restoreFractions() }
     }
     private func axisSpan(in owner: PaneLayoutController) -> (CGFloat, CGFloat) {
         guard let split else { return (0, 0) }
@@ -487,6 +629,13 @@ final class PaneLayoutController: NSViewController {
     /// Every pane's host view, in layout order.
     var paneViews: [NSView] {
         split == nil ? [view] : branches.flatMap(\.paneViews)
+    }
+
+    /// Stacked panes share a column; side-by-side branches add columns.
+    var columnCount: Int {
+        guard let vertical = axis else { return 1 }
+        return vertical ? branches.reduce(0) { $0 + $1.columnCount }
+            : branches.map(\.columnCount).max() ?? 1
     }
 
     func clearPreviews() {

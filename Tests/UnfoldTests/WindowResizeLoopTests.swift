@@ -37,7 +37,7 @@ final class WindowResizeLoopTests: XCTestCase {
     }
 
     @MainActor
-    func testFourPaneResizeKeepsMinimumStableAndAllowsSwitchingToTabs() throws {
+    func testFourPaneResizeKeepsMinimumStableAndAllowsFocusingOneChat() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let chats = (0..<4).map { Session(project: root, title: "Chat \($0)", storageRoot: root) }
@@ -65,8 +65,7 @@ final class WindowResizeLoopTests: XCTestCase {
             XCTAssertEqual(window.minSize, minimum, "Resizing must not recalculate a new minimum from transient view geometry")
         }
         XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 5)
-        workspace.setLayoutMode(.tabs)
-        XCTAssertEqual(workspace.layoutMode, .tabs)
+        workspace.singlePane(nil)
         XCTAssertEqual(window.minSize, NSSize(width: 860, height: 600))
     }
 }
