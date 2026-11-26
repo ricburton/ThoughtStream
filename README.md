@@ -6,7 +6,7 @@ ThoughtStream is a native Mac workspace for coding agents. Open a project folder
 
 [Download the latest notarized beta for Apple Silicon](https://github.com/ricburton/thoughtstream-releases#readme) · [Browse release notes](https://github.com/ricburton/thoughtstream-releases/releases) · [Report a problem](https://github.com/ricburton/thoughtstream-releases/issues)
 
-1. On an Apple Silicon Mac running macOS 14 or later, download the ZIP, unzip it and move the app to **Applications**. Open that copy in Finder.
+1. On an Apple Silicon Mac running macOS 14 or later, download the ZIP and unzip it. Build 30 contains **ThoughtStream Beta.app**. Earlier betas contain **ThoughtStream.app**. Move the app to **Applications** and open that copy in Finder.
 2. Choose **ThoughtStream → Settings → Connect ChatGPT** and sign in with your own account. The packaged beta includes Codex. Claude Code, Gemini CLI and local models use their own installations in builds that support them.
 3. Open a project folder and start a chat. Try “Explain how this project starts up.” Open **Show logs** in build 30 to follow the agent’s commands and output.
 

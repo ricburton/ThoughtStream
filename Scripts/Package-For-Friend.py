@@ -24,7 +24,7 @@ source = work / "Source"
 scratch = work / "SwiftBuild"
 output = args.output_dir or Path.home() / "Downloads" / f"ThoughtStream-Friend-Release-{stamp}"
 folder = output / "ThoughtStream Install"
-app = folder / "ThoughtStream.app"
+app = folder / "ThoughtStream Beta.app"
 
 
 def run(*command, **kwargs):
@@ -159,8 +159,8 @@ guide = """THOUGHTSTREAM — START HERE
 For Apple Silicon Macs (M1 or newer), macOS 14 Sonoma or later.
 
 INSTALL
-1. Drag ThoughtStream.app onto the Applications shortcut in this folder.
-2. Open ThoughtStream from Applications.
+1. Drag ThoughtStream Beta.app onto the Applications shortcut in this folder.
+2. Open ThoughtStream Beta from Applications.
 3. This personal beta is ad-hoc signed and is not notarized by Apple. If macOS
    blocks it, dismiss the alert, open System Settings > Privacy & Security,
    scroll to the blocked ThoughtStream message and click Open Anyway, then Open.
