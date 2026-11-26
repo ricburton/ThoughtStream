@@ -2,7 +2,19 @@
 
 ThoughtStream is a native Mac workspace for coding agents. Open a project folder, start a chat about its code, and watch commands, edits, diffs and replies arrive in the same feed. Keep a second conversation beside the first to review changes while another task runs. Chats and drafts are saved on your Mac.
 
-## Install the Mac beta
+## Screenshots
+
+| Side-by-side conversations | Activity logs |
+| --- | --- |
+| [![Four chat columns with the rightmost column split into two chats.](screenshots/conversations.png)](screenshots/conversations.png) | [![The same workspace with command output and tool results expanded above the chats.](screenshots/activity-logs.png)](screenshots/activity-logs.png) |
+
+## Releases
+
+**[Download the notarized Mac beta · 0.9.0, build 27](https://github.com/ricburton/thoughtstream-releases/releases/download/v0.9.0-b27/ThoughtStream-0.9.0-27-Apple-Silicon.zip)** for Apple Silicon Macs running macOS 14 or later. Unzip the app, move it to Applications, then open it. For updates, choose **ThoughtStream → Check for Updates…**.
+
+[Build 27 release notes](https://github.com/ricburton/thoughtstream-releases/releases/tag/v0.9.0-b27) · [All Mac downloads](https://github.com/ricburton/thoughtstream-releases/releases) · [Report a problem](https://github.com/ricburton/thoughtstream-releases/issues)
+
+**[Build 30 source prerelease](https://github.com/ricburton/ThoughtStream/releases/tag/v0.9.0-b30-source)** includes the multi-pane workspace shown above. [Build it from source](https://github.com/ricburton/ThoughtStream/blob/8f5a1aa829b5e9a5c67b36bb105ca2a7b7223751/README.md#build-from-source).
 
 [Download the latest notarized beta for Apple Silicon](https://github.com/ricburton/thoughtstream-releases#readme) · [Browse release notes](https://github.com/ricburton/thoughtstream-releases/releases) · [Report a problem](https://github.com/ricburton/thoughtstream-releases/issues)
 
