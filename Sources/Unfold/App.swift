@@ -163,6 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             view.insertItem(arrangeItem, at: singleIndex + 1)
         }
         // AppKit matches the shifted character on layouts where ⇧[ / ⇧] emit braces.
+        alias(view, #selector(WorkspaceWindow.toggleChatDisplayMode(_:)), "L", [.command, .shift])
         alias(view, #selector(WorkspaceWindow.selectPreviousTab(_:)), "{", [.command, .shift])
         alias(view, #selector(WorkspaceWindow.selectNextTab(_:)), "}", [.command, .shift])
         alias(view, #selector(WorkspaceWindow.selectPreviousTab(_:)), "[", [.command, .option])

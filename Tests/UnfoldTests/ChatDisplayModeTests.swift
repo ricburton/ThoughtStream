@@ -115,7 +115,7 @@ final class ChatDisplayModeTests: XCTestCase {
         XCTAssertEqual(panes.count, 2)
         XCTAssertTrue(panes.allSatisfy { $0.displayMode == .justChat && !$0.conversation.isHidden })
 
-        let restored = WorkspaceWindow(restoredSessions: [session], displayPreferences: preferences)
+        let restored = WorkspaceWindow(restoredSessions: [session], stateStore: WorkspaceStateStore(url: root.appendingPathComponent("restore-check.json")), displayPreferences: preferences)
         defer { restored.stopAll(); restored.window?.close() }
         XCTAssertEqual(restored.chatDisplayMode, .justChat)
         let oldMenu = NSApp.mainMenu, oldWindows = NSApp.windowsMenu, oldHelp = NSApp.helpMenu, oldServices = NSApp.servicesMenu
