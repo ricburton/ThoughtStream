@@ -41,7 +41,7 @@ See [local scripts and build utilities](Scripts/README.md) for the exact builder
 
 The default is **GPT-6.1 Sol · High · Standard**. Model, effort and tier are sent explicitly for new turns, including resumed chats. The speed picker uses the connected runtime's advertised capabilities and preserves a saved speed if it temporarily disappears. Before sending at an accelerated speed, ThoughtStream retries availability checks; if the tier remains unavailable, the message stays unsent with an explanation instead of silently falling back to Standard. Changes in the settings controls are remembered.
 
-Start a **New chat**, or **Open project…** for work in an existing folder. The app can use an existing ChatGPT sign-in managed by Codex. Otherwise, **Connect Local Codex** opens the browser sign-in flow. For API billing, use **Get API Key…** in Accounts to open the OpenAI dashboard. The API-key connection keeps credentials in memory until you quit.
+Start a **New chat**, or **Open project…** for work in an existing folder. The app can use an existing ChatGPT sign-in managed by Codex. Otherwise, **Connect Local Codex** opens the browser sign-in flow. For API billing, use **Get API Key…** in Accounts to open the OpenAI dashboard. Codex configures the key in memory until you quit. The first model request checks access to the selected model. Changing accounts waits for active chats to finish. A failed connection attempt leaves the previous account and open conversations available.
 
 ## Share with a friend
 

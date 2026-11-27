@@ -83,6 +83,7 @@ final class Session {
         throw CodexConnection.error("Could not load availability for \(settings.displayName). Your message is saved; retry when connected.")
     }
     var onRequestResolved: ((String) -> Void)?
+    var canChangeAccount: Bool { !connecting && turn == nil && queueWorker == nil }
     private var connecting = false
     private struct PaneReference { weak var value: StreamPane? }
     private var panes: [PaneReference] = []
@@ -604,22 +605,6 @@ final class Session {
         return try await client.accountType() != nil
     }
 
-    @discardableResult
-    func loginIfNeeded() async throws -> Bool {
-        if provider == .gemini {
-            throw CodexConnection.error("Run ‘gemini’ in Terminal and complete sign-in, then return here and send your message.")
-        }
-        if provider == .local { onStatus?("Local models need no sign-in"); return true }
-        if provider == .claude {
-            if try await isAuthenticated() { onStatus?("Claude Code connected"); return true }
-            throw CodexConnection.error("Sign in to Claude Code in Terminal with: claude auth login. Then return here and send again.")
-        }
-        guard let client = client, ready else { throw CodexConnection.error("Connect Codex first.") }
-        if try await client.accountType() == .chatGPT { onStatus?("ChatGPT connected"); return true }
-        NSWorkspace.shared.open(try await client.startChatGPTLogin())
-        onStatus?("Finish signing in in your browser")
-        return false
-    }
     static func messageInput(_ prompt: String, attachments: [ChatAttachment]) throws -> [[String: Any]] {
         guard attachments.count <= ChatAttachment.maximumCount else { throw CodexConnection.error("Attach up to 8 images per message.") }
         var input: [[String: Any]] = prompt.isEmpty ? [] : [["type": "text", "text": prompt]]

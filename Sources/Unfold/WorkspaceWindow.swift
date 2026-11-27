@@ -1475,42 +1475,12 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         settingsController?.showWindow(sender)
     }
     private func connectAccount(_ provider: AccountProvider, apiKey: String?, status: (String) -> Void) async throws -> String {
-        let executable: URL
-        switch provider {
-        case .codex:
-            executable = try CodexExecutable.resolve()
-            if let apiKey {
-                let probe = CodexConnection()
-                defer { probe.stop() }
-                try await probe.startWithKey(apiKey, executable: executable, directory: AgentInstructions.runtimeDirectory())
-            }
-        case .claude:
-            executable = try ClaudeConnection.executable()
-            if let apiKey {
-                try await ClaudeConnection.checkAPIKey(apiKey)
-            } else {
-                try await ClaudeConnection.ensureLocalSignIn(executable: executable, status: status)
-            }
-        }
-
-        try Task.checkCancellation()
-        if provider.currentKey != apiKey {
-            let chats = sessions.filter { $0.provider == provider.agent }
-            guard !chats.contains(where: { $0.turn != nil || $0.queueWorker != nil }) else {
-                throw CodexConnection.error("Finish the active " + provider.title + " turn before changing accounts.")
-            }
-            for chat in chats { chat.stop() }
-            provider.currentKey = apiKey
-            for chat in chats { configureQueue(for: chat) }
-        }
+        let executable = try provider == .codex ? CodexExecutable.resolve() : ClaudeConnection.executable()
+        let result = try await provider.connect(apiKey: apiKey, executable: executable,
+                                                sessions: { self.sessions }, configureQueue: configureQueue, status: status)
         selectProvider(provider.agent)
         if focusedColumn.session == nil { newChat(nil) }
-        guard let session = focusedColumn.session else { throw CodexConnection.error("Open a chat to connect.") }
-        try await session.connect(executable)
-        if provider == .codex, apiKey == nil, try await !session.loginIfNeeded() {
-            return "Finish ChatGPT sign-in in your browser."
-        }
-        return apiKey == nil ? "Connected with local sign-in." : "Connected with API key."
+        return result
     }
     private func selectProvider(_ provider: AgentProvider) {
         providerPicker.selectItem(at: AgentProvider.allCases.firstIndex(of: provider) ?? 0)

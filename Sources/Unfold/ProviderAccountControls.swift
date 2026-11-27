@@ -1,30 +1,5 @@
 import AppKit
 
-enum AccountProvider: CaseIterable {
-    case codex, claude
-
-    var title: String { self == .codex ? "Codex" : "Claude Code" }
-    var agent: AgentProvider { self == .codex ? .codex : .claude }
-    var localLabel: String { self == .codex ? "Local Codex" : "Local Claude" }
-    var keyLabel: String { self == .codex ? "OpenAI API key" : "Anthropic API key" }
-    var dashboard: URL {
-        switch self {
-        case .codex: return URL(string: "https://platform.openai.com/api-keys")!
-        case .claude: return URL(string: "https://platform.claude.com/settings/keys")!
-        }
-    }
-
-    @MainActor var currentKey: String? {
-        get { self == .codex ? CodexConnection.sessionAPIKey : ClaudeConnection.sessionAPIKey }
-        nonmutating set {
-            switch self {
-            case .codex: CodexConnection.sessionAPIKey = newValue
-            case .claude: ClaudeConnection.sessionAPIKey = newValue
-            }
-        }
-    }
-}
-
 @MainActor
 final class ProviderAccountControls: NSObject {
     typealias Connect = (AccountProvider, String?, (String) -> Void) async throws -> String

@@ -18,11 +18,10 @@ extension ClaudeConnection {
 
     static func isAuthenticated() async throws -> Bool {
         if sessionAPIKey != nil { return true }
-        return try await hasLocalSignIn()
+        return try await hasLocalSignIn(executable: executable())
     }
 
-    private static func hasLocalSignIn() async throws -> Bool {
-        let executable = try executable()
+    private static func hasLocalSignIn(executable: URL) async throws -> Bool {
         return try await Task.detached {
             let task = Process(), output = Pipe()
             task.executableURL = executable; task.arguments = ["auth", "status"]
@@ -36,7 +35,7 @@ extension ClaudeConnection {
     }
 
     static func ensureLocalSignIn(executable: URL, status: (String) -> Void) async throws {
-        if try await hasLocalSignIn() { return }
+        if try await hasLocalSignIn(executable: executable) { return }
         let script = FileManager.default.temporaryDirectory.appendingPathComponent("thoughtstream-claude-\(UUID().uuidString).command")
         try ClaudeConnection.signInScript(executable: executable).write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
@@ -47,7 +46,7 @@ extension ClaudeConnection {
         for _ in 0..<localSignInAttempts {
             try await Task.sleep(for: localSignInInterval)
             try Task.checkCancellation()
-            if try await hasLocalSignIn() { return }
+            if try await hasLocalSignIn(executable: executable) { return }
         }
         throw CodexConnection.error("Sign-in is still pending. Finish in Terminal, then connect again.")
     }

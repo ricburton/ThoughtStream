@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 @MainActor
 final class CodexConnection {
@@ -47,7 +47,30 @@ final class CodexConnection {
         return AccountType(rawValue: type)
     }
 
-    func startChatGPTLogin() async throws -> URL {
+    private static let signInTimeout = Duration.seconds(300)
+    private static let signInPollInterval = Duration.seconds(2)
+
+    static func ensureLocalSignIn(executable: URL, status: (String) -> Void) async throws {
+        // Explicitly use the default CLI credential store even if the app is
+        // currently using an ephemeral API key.
+        let probe = CodexConnection()
+        defer { probe.stop() }
+        try await probe.startStdio(executable: executable, directory: AgentInstructions.runtimeDirectory(), ephemeral: false)
+        if try await probe.accountType() == .chatGPT { return }
+        guard NSWorkspace.shared.open(try await probe.startChatGPTLogin()) else {
+            throw error("Could not open the ChatGPT sign-in page.")
+        }
+        status("Finish signing in to ChatGPT in your browser.")
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: signInTimeout)
+        while clock.now < deadline {
+            try await Task.sleep(for: signInPollInterval)
+            if try await probe.accountType() == .chatGPT { return }
+        }
+        throw error("ChatGPT sign-in timed out. Connect again to retry.")
+    }
+
+    private func startChatGPTLogin() async throws -> URL {
         let result = try await request(Self.accountLogin, ["type": AccountType.chatGPT.rawValue])
         guard let text = result["authUrl"] as? String, let url = URL(string: text),
               url.scheme == "https", url.host == "auth.openai.com" else {
