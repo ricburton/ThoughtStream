@@ -24,14 +24,7 @@ final class ClaudeConnection {
     private var stderrText = ""
 
     static func executable() throws -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let paths = [UserDefaults.standard.string(forKey: "claudePath"), home + "/.local/bin/claude",
-                     "/opt/homebrew/bin/claude", "/usr/local/bin/claude", home + "/.claude/local/claude"]
-            .compactMap { $0 } + (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map { String($0) + "/claude" }
-        guard let path = paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            throw CodexConnection.error("Install the Claude Code CLI to connect Claude.")
-        }
-        return URL(fileURLWithPath: path)
+        try ClaudeExecutable.resolve()
     }
 
     static func arguments(settings: InferenceSettings, mode: AccessMode, resume: String?, fork: Bool, models: [[String: Any]] = []) -> [String] {

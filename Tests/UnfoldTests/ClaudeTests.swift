@@ -2,6 +2,23 @@ import XCTest
 @testable import ThoughtStream
 
 final class ClaudeTests: XCTestCase {
+    func testDesktopDiscoveryPrefersLatestUsableVersion() throws {
+        let files = FileManager.default
+        let root = files.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? files.removeItem(at: root) }
+        func executable(_ version: String) -> URL {
+            root.appendingPathComponent(version + "/build/claude.app/Contents/MacOS/claude")
+        }
+        for version in ["2.1.9", "2.1.10", "2.1.11"] {
+            let cli = executable(version)
+            try files.createDirectory(at: cli.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data().write(to: cli)
+            try files.setAttributes([.posixPermissions: version == "2.1.11" ? 0o600 : 0o700], ofItemAtPath: cli.path)
+        }
+        let found = try XCTUnwrap(ClaudeExecutable.desktopCLI(in: root))
+        XCTAssertEqual(found.resolvingSymlinksInPath(), executable("2.1.10").resolvingSymlinksInPath())
+    }
+
     func testProviderSettingsStaySeparate() throws {
         let name = "ClaudeSettings-\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
