@@ -1,5 +1,11 @@
 # ThoughtStream
 
+## [Download ThoughtStream for Mac](https://github.com/ricburton/ThoughtStream/releases/latest/download/ThoughtStream.dmg)
+
+Open the downloaded disk image, drag **ThoughtStream Beta** to **Applications**, then open it. For Apple Silicon Macs running macOS 14 or later.
+
+---
+
 ThoughtStream is a native Mac workspace for coding agents. Open a project folder, start a chat about its code, and watch commands, edits, diffs and replies arrive in the same feed. Keep a second conversation beside the first to review changes while another task runs. Chats and drafts are saved on your Mac.
 
 ## Screenshots
@@ -8,21 +14,15 @@ ThoughtStream is a native Mac workspace for coding agents. Open a project folder
 | --- | --- |
 | [![Four chat columns with the rightmost column split into two chats.](screenshots/conversations.png)](screenshots/conversations.png) | [![The same workspace with command output and tool results expanded above the chats.](screenshots/activity-logs.png)](screenshots/activity-logs.png) |
 
-## Releases
+## Getting started
 
-**[Download the notarized Mac beta · 0.9.0, build 27](https://github.com/ricburton/thoughtstream-releases/releases/download/v0.9.0-b27/ThoughtStream-0.9.0-27-Apple-Silicon.zip)** for Apple Silicon Macs running macOS 14 or later. Unzip the app, move it to Applications, then open it. For updates, choose **ThoughtStream → Check for Updates…**.
+1. [Download ThoughtStream for Mac](https://github.com/ricburton/ThoughtStream/releases/latest/download/ThoughtStream.dmg), open the disk image and drag **ThoughtStream Beta** to **Applications**. The app is signed and notarized by Apple.
+2. Choose **ThoughtStream → Settings → Connect ChatGPT** and sign in with your own account. The app includes Codex. Claude Code, Gemini CLI and local models use their own installations.
+3. Open a project folder and start a chat. Try “Explain how this project starts up.” Open **Show logs** to follow the agent’s commands and output.
 
-[Build 27 release notes](https://github.com/ricburton/thoughtstream-releases/releases/tag/v0.9.0-b27) · [All Mac downloads](https://github.com/ricburton/thoughtstream-releases/releases) · [Report a problem](https://github.com/ricburton/thoughtstream-releases/issues)
+For later betas, choose **ThoughtStream → Check for Updates…**. The app checks for updates every four hours, and you choose when to install.
 
-**[Build 30 source prerelease](https://github.com/ricburton/ThoughtStream/releases/tag/v0.9.0-b30-source)** includes the multi-pane workspace shown above. [Build it from source](https://github.com/ricburton/ThoughtStream/blob/8f5a1aa829b5e9a5c67b36bb105ca2a7b7223751/README.md#build-from-source).
-
-[Download the latest notarized beta for Apple Silicon](https://github.com/ricburton/thoughtstream-releases#readme) · [Browse release notes](https://github.com/ricburton/thoughtstream-releases/releases) · [Report a problem](https://github.com/ricburton/thoughtstream-releases/issues)
-
-1. On an Apple Silicon Mac running macOS 14 or later, download the ZIP and unzip it. Build 30 contains **ThoughtStream Beta.app**. Earlier betas contain **ThoughtStream.app**. Move the app to **Applications** and open that copy in Finder.
-2. Choose **ThoughtStream → Settings → Connect ChatGPT** and sign in with your own account. The packaged beta includes Codex. Claude Code, Gemini CLI and local models use their own installations in builds that support them.
-3. Open a project folder and start a chat. Try “Explain how this project starts up.” Open **Show logs** in build 30 to follow the agent’s commands and output.
-
-For subsequent betas, choose **ThoughtStream → Check for Updates…**. The app checks its signed beta feed every four hours. You choose when to install, and an update restart waits for active work to finish. The downloads page lists the build currently available through that feed.
+[Release notes](https://github.com/ricburton/ThoughtStream/releases) · [Report a problem](https://github.com/ricburton/ThoughtStream/issues)
 
 ## Build from source
 
