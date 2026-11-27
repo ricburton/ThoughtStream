@@ -66,7 +66,9 @@ final class InterfacePolishTests: XCTestCase {
     @MainActor
     func testSettingsRowsFitEveryPageAtMinimumWindowSize() throws {
         let settings = SettingsWindowController(target: self, actions: [:],
-            chatGPTButton: NSButton(title: "Connect ChatGPT", target: nil, action: nil),
+            localCodexButton: NSButton(title: "Connect Local Codex", target: nil, action: nil),
+            apiKeyField: NSSecureTextField(),
+            apiKeyButton: NSButton(title: "Connect with API Key", target: nil, action: nil),
             claudeButton: NSButton(title: "Connect Claude", target: nil, action: nil),
             claudeStatus: NSTextField(wrappingLabelWithString: "Use your Claude Code sign-in on this Mac."))
         let window = try XCTUnwrap(settings.window)

@@ -601,24 +601,31 @@ final class Session {
         if provider == .local { return true }
         if provider == .claude { return try await ClaudeConnection.isAuthenticated() }
         guard let client = client, ready else { return false }
-        let result = try await client.request("account/read", ["refreshToken": false])
-        return (result["account"] as? [String: Any])?["type"] as? String == "chatgpt"
+        let mode = try await codexAccountType(client)
+        return mode == "chatgpt" || mode == "apiKey"
     }
-    func loginIfNeeded() async throws {
+    private func codexAccountType(_ client: CodexConnection) async throws -> String? {
+        let result = try await client.request("account/read", ["refreshToken": false])
+        return (result["account"] as? [String: Any])?["type"] as? String
+    }
+
+    @discardableResult
+    func loginIfNeeded() async throws -> Bool {
         if provider == .gemini {
             throw CodexConnection.error("Run ‘gemini’ in Terminal and complete sign-in, then return here and send your message.")
         }
-        if provider == .local { onStatus?("Local models need no sign-in"); return }
+        if provider == .local { onStatus?("Local models need no sign-in"); return true }
         if provider == .claude {
-            if try await isAuthenticated() { onStatus?("Claude Code connected"); return }
+            if try await isAuthenticated() { onStatus?("Claude Code connected"); return true }
             throw CodexConnection.error("Sign in to Claude Code in Terminal with: claude auth login. Then return here and send again.")
         }
-        if try await isAuthenticated() { onStatus?("ChatGPT connected"); return }
         guard let client = client, ready else { throw CodexConnection.error("Connect Codex first.") }
+        if try await codexAccountType(client) == "chatgpt" { onStatus?("ChatGPT connected"); return true }
         let result = try await client.request("account/login/start", ["type": "chatgpt"])
         if let text = result["authUrl"] as? String, let url = URL(string: text), url.scheme == "https", url.host == "auth.openai.com" {
             NSWorkspace.shared.open(url); onStatus?("Finish signing in in your browser")
-        } else { report(.system, Self.pretty(result)) }
+        } else { throw CodexConnection.error("Codex did not provide a ChatGPT sign-in URL.") }
+        return false
     }
     static func messageInput(_ prompt: String, attachments: [ChatAttachment]) throws -> [[String: Any]] {
         guard attachments.count <= ChatAttachment.maximumCount else { throw CodexConnection.error("Attach up to 8 images per message.") }
@@ -938,7 +945,7 @@ final class Session {
             finalResponse = nil; save(); flushProtocol()
             // A resend is paced by its own timer rather than fired at once.
             if retried == nil { resumeMessageQueue() }
-        case "account/login/completed": report(.system, Self.pretty(p)); onStatus?((p["success"] as? Bool) == true ? "ChatGPT connected" : "Sign-in failed")
+        case "account/login/completed": report(.system, Self.pretty(p)); onStatus?((p["success"] as? Bool) == true ? "Codex connected" : "Sign-in failed")
         case "serverRequest/resolved": if let id = p["requestId"] { resolveRequest(id) }
         case "runtime/stderr": report(.system, p["text"] as? String ?? "")
         case "warning":

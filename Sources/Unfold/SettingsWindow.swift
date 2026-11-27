@@ -72,7 +72,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     /// contacts a local server.
     var scansLocalModelsWhenShown = false
 
-    init(target: AnyObject, actions: [Action: Selector], chatGPTButton: NSButton,
+    init(target: AnyObject, actions: [Action: Selector], localCodexButton: NSButton,
+         apiKeyField: NSSecureTextField, apiKeyButton: NSButton,
          claudeButton: NSButton, claudeStatus: NSTextField, localModels: LocalModelRegistry? = nil) {
         self.localModels = localModels ?? .shared
         let panel = SettingsPanel(contentRect: NSRect(x: 0, y: 0, width: 900, height: 640),
@@ -99,20 +100,40 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             ])
         pages[.general] = page([layoutSection], note: "Each chat has its own region of the screen.")
 
-        chatGPTButton.bezelStyle = .rounded
-        chatGPTButton.font = Typography.interface
+        localCodexButton.bezelStyle = .rounded
+        localCodexButton.font = Typography.interface
         claudeButton.bezelStyle = .rounded
         claudeButton.font = Typography.interface
         claudeStatus.font = Typography.caption
         claudeStatus.textColor = FeedPalette.muted
         claudeStatus.isSelectable = true
         claudeStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let getKey = ThemedButton(title: "Get API Key…", target: target, action: #selector(WorkspaceWindow.getOpenAIKey(_:)))
+        apiKeyField.placeholderString = "Enter API key"
+        apiKeyField.setAccessibilityLabel("OpenAI API key")
+        apiKeyField.target = apiKeyButton.target
+        apiKeyField.action = apiKeyButton.action
+        let entry = NSStackView(views: [apiKeyField, apiKeyButton])
+        entry.orientation = .horizontal
+        entry.alignment = .centerY
+        entry.spacing = 8
+        entry.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 14, right: 0)
+        apiKeyButton.setContentHuggingPriority(.required, for: .horizontal)
+        apiKeyField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let keyHeader = row("OpenAI API key", detail: "Use your API project for this session.", controls: [getKey])
+        let keyRow = NSStackView(views: [keyHeader, entry])
+        keyRow.orientation = .vertical
+        keyRow.spacing = 0
+        for view in [keyHeader, entry] { view.widthAnchor.constraint(equalTo: keyRow.widthAnchor).isActive = true }
         pages[.accounts] = page([
-            section("Connected services", rows: [
-                row("ChatGPT", detail: "Connect your account to use Codex.", controls: [chatGPTButton]),
-                row("Claude", detailView: claudeStatus, controls: [claudeButton])
+            section("Codex", rows: [
+                row("Local Codex", detail: "Use the ChatGPT sign-in from your installed Codex CLI.", controls: [localCodexButton]),
+                keyRow
+            ]),
+            section("Claude Code", rows: [
+                row("Local Claude", detailView: claudeStatus, controls: [claudeButton])
             ])
-        ], note: "Choose a service in the sidebar when starting a chat. Existing chats keep their service.")
+        ], note: "API keys are kept in memory until you quit.")
 
         pages[.localModels] = makeLocalModelsPage()
 

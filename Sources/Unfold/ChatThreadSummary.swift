@@ -103,7 +103,7 @@ enum ChatThreadSummary {
         return label
     }
 
-    static func generate(input: Input, provider: AgentProvider, model: String, executable: URL) async throws -> String {
+    static func generate(input: Input, provider: AgentProvider, model: String, executable: URL, apiKey: String? = nil) async throws -> String {
         let process = SummaryProcess()
         return try await withTaskCancellationHandler {
             try await Task.detached(priority: .utility) {
@@ -120,6 +120,7 @@ enum ChatThreadSummary {
                 task.arguments = arguments(provider: provider, model: model)
                 var environment = ProcessInfo.processInfo.environment
                 for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "CLAUDECODE"] { environment.removeValue(forKey: key) }
+                if provider == .codex, let apiKey { environment["CODEX_API_KEY"] = apiKey }
                 task.environment = environment
                 task.standardInput = stdin; task.standardOutput = stdout; task.standardError = FileHandle.nullDevice
                 try process.start(task)

@@ -54,7 +54,10 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private var localObservers: [NSObjectProtocol] = []
     private var prompt: ComposerTextView { primaryColumn.prompt }
     private let heading = NSTextField(labelWithString: "ThoughtStream")
-    private let loginButton = ThemedButton(title: "Connect ChatGPT", target: nil, action: nil)
+    private var changingCodexAccount = false
+    private let apiKeyField = NSSecureTextField()
+    private let apiKeyButton = ThemedButton(title: "Connect with API Key", target: nil, action: nil)
+    private let loginButton = ThemedButton(title: "Connect Local Codex", target: nil, action: nil)
     private let settingsButton = AddPaneButton(title: "Settings", target: nil, action: nil)
     private let rebalanceButton = AddPaneButton(title: "Rebalance", target: nil, action: nil)
     private let chatDisplayButton = AddPaneButton(title: "Just chat", target: nil, action: nil)
@@ -897,7 +900,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                 }
                 let executable = try session.provider == .claude ? ClaudeConnection.executable() : self.executable(allowPrompt: false)
                 return try await ChatThreadSummary.generate(input: input, provider: session.provider,
-                                                            model: session.inferenceSettings.model, executable: executable)
+                                                            model: session.inferenceSettings.model, executable: executable,
+                                                            apiKey: session.provider == .codex ? CodexConnection.sessionAPIKey : nil)
             }, updated: { [weak self] in self?.refreshNavigation() })
         }
         conversationSidebar.reloadData()
@@ -1011,13 +1015,41 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         }
     }
     private func executable(allowPrompt: Bool = true) throws -> URL {
-        let bundled = Bundle.main.resourceURL?.appendingPathComponent("codex/bin/codex")
-        let paths: [String?] = [UserDefaults.standard.string(forKey: "codexPath"), bundled?.path, "/opt/homebrew/bin/codex", "/usr/local/bin/codex", FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/codex").path]
-        for path in paths.compactMap({ $0 }) where FileManager.default.isExecutableFile(atPath: path) { return URL(fileURLWithPath: path) }
+        let files = FileManager.default
+        let paths: [String?] = [
+            UserDefaults.standard.string(forKey: "codexPath"),
+            Bundle.main.resourceURL?.appendingPathComponent("codex/bin/codex").path,
+            "/opt/homebrew/bin/codex", "/usr/local/bin/codex",
+            files.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/codex").path,
+            "/Applications/ChatGPT.app",
+            files.homeDirectoryForCurrentUser.appendingPathComponent("Applications/ChatGPT.app").path
+        ]
+        func resolve(_ path: String) -> URL? {
+            var url = URL(fileURLWithPath: path)
+            if url.pathExtension.lowercased() == "app" {
+                url.appendPathComponent("Contents/Resources/codex-cli/bin/codex")
+            }
+            let resolved = url.resolvingSymlinksInPath()
+            guard (try? resolved.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
+                  files.isExecutableFile(atPath: resolved.path) else { return nil }
+            return url
+        }
+        for path in paths.compactMap({ $0 }) {
+            if let url = resolve(path) { return url }
+        }
         guard allowPrompt else { throw CodexConnection.error("Install Codex to find previous conversations.") }
-        let panel = NSOpenPanel(); panel.title = "Select the Codex executable"; panel.message = "Choose a native codex executable. The build launcher can bundle Codex for you."; panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { throw CodexConnection.error("No Codex executable selected.") }
-        UserDefaults.standard.set(url.path, forKey: "codexPath"); return url
+        let panel = NSOpenPanel()
+        panel.title = "Select Codex"
+        panel.message = "Choose the codex executable or the ChatGPT app that contains it."
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let selected = panel.url else {
+            throw CodexConnection.error("No Codex executable selected.")
+        }
+        guard let url = resolve(selected.path) else {
+            throw CodexConnection.error("This selection does not contain an executable Codex CLI.")
+        }
+        UserDefaults.standard.set(url.path, forKey: "codexPath")
+        return url
     }
     private func run(_ operation: @escaping () async throws -> Void) {
         Task { @MainActor in do { try await operation() } catch { let alert = NSAlert(error: error); alert.runModal() } }
@@ -1249,7 +1281,6 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         providerPicker.selectItem(at: AgentProvider.allCases.firstIndex(of: provider) ?? 0)
         populateModelList(modelCatalog.models(for: provider))
         access.title = provider.accessLabel
-        loginButton.title = "Connect ChatGPT"
         refreshModelsIfNeeded()
     }
     func menuWillOpen(_ menu: NSMenu) {
@@ -1471,6 +1502,8 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
 
     @objc func showSettings(_ sender: Any?) {
         if settingsController == nil {
+            apiKeyButton.target = self
+            apiKeyButton.action = #selector(connectOpenAIKey(_:))
             claudeConnectButton.target = self
             claudeConnectButton.action = #selector(connectClaudeAccount(_:))
             settingsController = SettingsWindowController(
@@ -1481,17 +1514,67 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                     .fork: #selector(forkSession(_:)), .requests: #selector(showRequests(_:)),
                     .snapshot: #selector(showProtocol(_:)), .export: #selector(exportLog(_:))
                 ],
-                chatGPTButton: loginButton, claudeButton: claudeConnectButton,
+                localCodexButton: loginButton, apiKeyField: apiKeyField, apiKeyButton: apiKeyButton, claudeButton: claudeConnectButton,
                 claudeStatus: claudeAccountStatus, localModels: localModels)
             settingsController?.scansLocalModelsWhenShown = automaticallyDiscoverModels
         }
         settingsController?.showWindow(sender)
     }
+    @objc func getOpenAIKey(_ sender: Any?) {
+        NSWorkspace.shared.open(URL(string: "https://platform.openai.com/api-keys")!)
+    }
+
+    private func switchCodexAccount(to key: String?) throws {
+        let chats = sessions.filter { $0.provider == .codex }
+        guard !chats.contains(where: { $0.turn != nil || $0.queueWorker != nil }) else {
+            throw CodexConnection.error("Finish the active Codex turn before changing accounts.")
+        }
+        for chat in chats { chat.stop() }
+        CodexConnection.sessionAPIKey = key
+        for chat in chats { configureQueue(for: chat) }
+        apiKeyField.placeholderString = key == nil ? "Enter API key" : "API key connected · Enter a replacement"
+        apiKeyButton.title = key == nil ? "Connect with API Key" : "Update API Key"
+        loginButton.title = "Connect Local Codex"
+    }
+
+    @objc func connectOpenAIKey(_ sender: Any?) {
+        guard !changingCodexAccount else { return }
+        let key = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else {
+            apiKeyField.window?.makeFirstResponder(apiKeyField)
+            return
+        }
+        apiKeyField.stringValue = ""
+        changingCodexAccount = true
+        apiKeyButton.isEnabled = false
+        run {
+            defer {
+                self.changingCodexAccount = false
+                self.apiKeyButton.isEnabled = true
+            }
+            let probe = CodexConnection()
+            defer { probe.stop() }
+            try await probe.startWithKey(key, executable: self.executable(), directory: AgentInstructions.runtimeDirectory())
+            try self.switchCodexAccount(to: key)
+            self.selectProvider(.codex)
+            if self.focusedColumn.session == nil { self.newChat(sender) }
+            if let session = self.focusedColumn.session { try await session.connect(self.executable()) }
+        }
+    }
+
     @objc func signIn(_ sender: Any?) {
+        guard !changingCodexAccount else { return }
+        if CodexConnection.sessionAPIKey != nil {
+            do { try switchCodexAccount(to: nil) }
+            catch { NSAlert(error: error).runModal(); return }
+        }
         selectProvider(.codex)
         if focusedColumn.session == nil { newChat(sender) }
         guard let s = focusedColumn.session else { return }
-        run { try await s.connect(self.executable()); try await s.loginIfNeeded(); self.loginButton.title = "ChatGPT connected" }
+        run {
+            try await s.connect(self.executable())
+            self.loginButton.title = try await s.loginIfNeeded() ? "Local Codex connected" : "Finish browser sign-in"
+        }
     }
     private func selectProvider(_ provider: AgentProvider) {
         providerPicker.selectItem(at: AgentProvider.allCases.firstIndex(of: provider) ?? 0)

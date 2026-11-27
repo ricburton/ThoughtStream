@@ -17,7 +17,7 @@ ThoughtStream is a native Mac workspace for coding agents. Open a project folder
 ## Getting started
 
 1. [Download ThoughtStream for Mac](https://github.com/ricburton/ThoughtStream/releases/latest/download/ThoughtStream.dmg), open the disk image and drag **ThoughtStream Beta** to **Applications**. The app is signed and notarized by Apple.
-2. Choose **ThoughtStream → Settings → Connect ChatGPT** and sign in with your own account. The app includes Codex. Claude Code, Gemini CLI and local models use their own installations.
+2. Open **ThoughtStream → Settings → Accounts → Codex**. Choose **Connect Local Codex** to use your ChatGPT sign-in, or enter your OpenAI project key and choose **Connect with API Key**. The app includes Codex. Claude Code, Gemini CLI and local models use their own installations.
 3. Open a project folder and start a chat. Try “Explain how this project starts up.” Open **Show logs** to follow the agent’s commands and output.
 
 For later betas, choose **ThoughtStream → Check for Updates…**. The app checks for updates every four hours, and you choose when to install.
@@ -41,7 +41,7 @@ See [local scripts and build utilities](Scripts/README.md) for the exact builder
 
 The default is **GPT-6.1 Sol · High · Standard**. Model, effort and tier are sent explicitly for new turns, including resumed chats. The speed picker uses the connected runtime's advertised capabilities and preserves a saved speed if it temporarily disappears. Before sending at an accelerated speed, ThoughtStream retries availability checks; if the tier remains unavailable, the message stays unsent with an explanation instead of silently falling back to Standard. Changes in the settings controls are remembered.
 
-Start a **New chat**, or **Open project…** for work in an existing folder. The app can use an existing ChatGPT sign-in managed by Codex. Otherwise, **Connect ChatGPT** opens the official browser sign-in flow. It does not ask for an API key or copy browser cookies.
+Start a **New chat**, or **Open project…** for work in an existing folder. The app can use an existing ChatGPT sign-in managed by Codex. Otherwise, **Connect Local Codex** opens the browser sign-in flow. For API billing, use **Get API Key…** in Accounts to open the OpenAI dashboard. The API-key connection keeps credentials in memory until you quit.
 
 ## Share with a friend
 
@@ -55,7 +55,7 @@ submission and Gatekeeper checks pass.
 
 Run `python3 Scripts/Package-For-Friend.py` to build an Apple Silicon release in an isolated cache directory without installing it or restarting your running app. It creates a dated `~/Downloads/ThoughtStream-Friend-Release-…` folder containing `ThoughtStream Install`, a compressed ZIP, a SHA-256 checksum, and a build manifest. The install folder contains the app, an Applications shortcut, and `START HERE.txt`. It includes pinned, checksum-verified Codex and Node runtimes and the offline analysis tools; it never copies account credentials, conversations, or project data from your home folder. Packaging outside the cloud-managed source directory avoids iCloud metadata interfering with signing.
 
-The recipient needs an M1-or-newer Mac running macOS 14+, and their own account with Codex access. They unzip the download, drag the app to Applications, and connect ChatGPT in Settings. This is an ad-hoc-signed personal beta, not an Apple-notarized release; the included guide explains the one-time **Privacy & Security → Open Anyway** step. Start with Standard speed and select a model available to their account. Claude Code remains an optional, separately installed provider.
+The recipient needs an M1-or-newer Mac running macOS 14+, and their own account with Codex access. They unzip the download, drag the app to Applications, and choose a Codex connection in Settings. This is an ad-hoc-signed personal beta, not an Apple-notarized release; the included guide explains the one-time **Privacy & Security → Open Anyway** step. Start with Standard speed and select a model available to their account. Claude Code remains an optional, separately installed provider.
 
 ## Claude Code
 

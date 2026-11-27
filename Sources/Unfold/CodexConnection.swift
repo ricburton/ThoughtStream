@@ -2,9 +2,12 @@ import Foundation
 
 @MainActor
 final class CodexConnection {
+    // API-key sessions use dedicated stdio processes with memory-only credentials.
+    static var sessionAPIKey: String?
     var onEvent: (([String: Any]) -> Void)?
     var onDisconnect: (() -> Void)?
     var onNetworkActivity: () -> Void = { ConnectivityMonitor.shared.recordNetworkActivity() }
+    private var configuringAPIKey = false
     private var process: Process?
     private var persistentID: UUID?
     private var socket: LocalRuntimeSocket?
@@ -16,6 +19,10 @@ final class CodexConnection {
     func start(executable: URL, project: URL? = nil, persistentID: UUID? = nil) async throws {
         guard process == nil, socket == nil else { return }
         let directory = try project ?? AgentInstructions.runtimeDirectory()
+        if let key = Self.sessionAPIKey {
+            try await startWithKey(key, executable: executable, directory: directory)
+            return
+        }
         if let persistentID {
             self.persistentID = persistentID
             let url = try await CodexRuntimeHost.ensure(executable: executable, project: directory, id: persistentID)
@@ -26,10 +33,33 @@ final class CodexConnection {
             catch { socket.close(); self.socket = nil; throw error }
             return
         }
+        try await startStdio(executable: executable, directory: directory, ephemeral: false)
+    }
+
+    func startWithKey(_ key: String, executable: URL, directory: URL) async throws {
+        configuringAPIKey = true
+        defer { configuringAPIKey = false }
+        try await startStdio(executable: executable, directory: directory, ephemeral: true)
+        do {
+            let response = try await request("account/login/start", ["type": "apiKey", "apiKey": key])
+            let account = try await request("account/read", ["refreshToken": false])
+            guard response["type"] as? String == "apiKey",
+                  (account["account"] as? [String: Any])?["type"] as? String == "apiKey" else {
+                throw Self.error("Codex did not accept API-key mode.")
+            }
+        } catch {
+            stop()
+            throw Self.error("Codex could not configure the OpenAI API key.")
+        }
+    }
+
+    private func startStdio(executable: URL, directory: URL, ephemeral: Bool) async throws {
         let task = Process()
         task.executableURL = executable
         task.currentDirectoryURL = directory
-        task.arguments = ["app-server"]
+        task.arguments = ephemeral
+            ? ["-c", "cli_auth_credentials_store=\"ephemeral\"", "app-server"]
+            : ["app-server"]
         task.standardInput = input; task.standardOutput = output; task.standardError = errors
         var environment = ProcessInfo.processInfo.environment
         environment.removeValue(forKey: "OPENAI_API_KEY")
@@ -42,7 +72,7 @@ final class CodexConnection {
         }
         errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            guard !data.isEmpty, !ephemeral else { return }
             Task { @MainActor [weak self] in self?.onEvent?(["method": "runtime/stderr", "params": ["text": String(decoding: data, as: UTF8.self)]]) }
         }
         task.terminationHandler = { [weak self] _ in
@@ -53,7 +83,8 @@ final class CodexConnection {
             }
         }
         try task.run(); process = task
-        try await initialize()
+        do { try await initialize() }
+        catch { stop(); throw error }
     }
 
     private func initialize() async throws {
@@ -111,7 +142,9 @@ final class CodexConnection {
         socket?.close(); socket = nil
         buffer = Data()
         output.fileHandleForReading.readabilityHandler = nil; errors.fileHandleForReading.readabilityHandler = nil
-        try? input.fileHandleForWriting.close(); process?.terminate()
+        try? input.fileHandleForWriting.close()
+        if let process, process.isRunning { process.terminate() }
+        process = nil
         if terminateRuntime, let persistentID { CodexRuntimeHost.stop(id: persistentID) }
         let pending = callbacks; callbacks.removeAll()
         for callback in pending.values { callback(.failure(CancellationError())) }
@@ -123,6 +156,7 @@ final class CodexConnection {
             guard process?.isRunning == true else { throw Self.error("Codex is not running.") }
             bytes.append(10); try input.fileHandleForWriting.write(contentsOf: bytes)
         }
+        guard !configuringAPIKey else { return }
         var event = message; event["_direction"] = "outgoing"; onEvent?(event)
     }
     private func receive(_ data: Data) {
@@ -136,6 +170,7 @@ final class CodexConnection {
                 }
                 else { callback(.success(message["result"] as? [String: Any] ?? [:])) }
             }
+            guard !configuringAPIKey else { continue }
             var event = message; event["_direction"] = "incoming"; onEvent?(event)
         }
     }
