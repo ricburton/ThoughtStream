@@ -83,6 +83,7 @@ final class Session {
         throw CodexConnection.error("Could not load availability for \(settings.displayName). Your message is saved; retry when connected.")
     }
     var onRequestResolved: ((String) -> Void)?
+    var canChangeAccount: Bool { !connecting && turn == nil && queueWorker == nil }
     private var connecting = false
     private struct PaneReference { weak var value: StreamPane? }
     private var panes: [PaneReference] = []
@@ -601,25 +602,9 @@ final class Session {
         if provider == .local { return true }
         if provider == .claude { return try await ClaudeConnection.isAuthenticated() }
         guard let client = client, ready else { return false }
-        let result = try await client.request("account/read", ["refreshToken": false])
-        return (result["account"] as? [String: Any])?["type"] as? String == "chatgpt"
+        return try await client.accountType() != nil
     }
-    func loginIfNeeded() async throws {
-        if provider == .gemini {
-            throw CodexConnection.error("Run ‘gemini’ in Terminal and complete sign-in, then return here and send your message.")
-        }
-        if provider == .local { onStatus?("Local models need no sign-in"); return }
-        if provider == .claude {
-            if try await isAuthenticated() { onStatus?("Claude Code connected"); return }
-            throw CodexConnection.error("Sign in to Claude Code in Terminal with: claude auth login. Then return here and send again.")
-        }
-        if try await isAuthenticated() { onStatus?("ChatGPT connected"); return }
-        guard let client = client, ready else { throw CodexConnection.error("Connect Codex first.") }
-        let result = try await client.request("account/login/start", ["type": "chatgpt"])
-        if let text = result["authUrl"] as? String, let url = URL(string: text), url.scheme == "https", url.host == "auth.openai.com" {
-            NSWorkspace.shared.open(url); onStatus?("Finish signing in in your browser")
-        } else { report(.system, Self.pretty(result)) }
-    }
+
     static func messageInput(_ prompt: String, attachments: [ChatAttachment]) throws -> [[String: Any]] {
         guard attachments.count <= ChatAttachment.maximumCount else { throw CodexConnection.error("Attach up to 8 images per message.") }
         var input: [[String: Any]] = prompt.isEmpty ? [] : [["type": "text", "text": prompt]]
@@ -938,7 +923,7 @@ final class Session {
             finalResponse = nil; save(); flushProtocol()
             // A resend is paced by its own timer rather than fired at once.
             if retried == nil { resumeMessageQueue() }
-        case "account/login/completed": report(.system, Self.pretty(p)); onStatus?((p["success"] as? Bool) == true ? "ChatGPT connected" : "Sign-in failed")
+        case "account/login/completed": report(.system, Self.pretty(p)); onStatus?((p["success"] as? Bool) == true ? "Codex connected" : "Sign-in failed")
         case "serverRequest/resolved": if let id = p["requestId"] { resolveRequest(id) }
         case "runtime/stderr": report(.system, p["text"] as? String ?? "")
         case "warning":

@@ -66,9 +66,7 @@ final class InterfacePolishTests: XCTestCase {
     @MainActor
     func testSettingsRowsFitEveryPageAtMinimumWindowSize() throws {
         let settings = SettingsWindowController(target: self, actions: [:],
-            chatGPTButton: NSButton(title: "Connect ChatGPT", target: nil, action: nil),
-            claudeButton: NSButton(title: "Connect Claude", target: nil, action: nil),
-            claudeStatus: NSTextField(wrappingLabelWithString: "Use your Claude Code sign-in on this Mac."))
+            accounts: ProviderAccountControls.all { _, _, _ in "Connected" })
         let window = try XCTUnwrap(settings.window)
         defer { window.close() }
         window.setContentSize(NSSize(width: 760, height: 480))

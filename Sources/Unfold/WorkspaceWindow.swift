@@ -54,7 +54,10 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private var localObservers: [NSObjectProtocol] = []
     private var prompt: ComposerTextView { primaryColumn.prompt }
     private let heading = NSTextField(labelWithString: "ThoughtStream")
-    private let loginButton = ThemedButton(title: "Connect ChatGPT", target: nil, action: nil)
+    private lazy var accounts = ProviderAccountControls.all { [weak self] provider, key, status in
+        guard let self else { throw CancellationError() }
+        return try await self.connectAccount(provider, apiKey: key, status: status)
+    }
     private let settingsButton = AddPaneButton(title: "Settings", target: nil, action: nil)
     private let rebalanceButton = AddPaneButton(title: "Rebalance", target: nil, action: nil)
     private let chatDisplayButton = AddPaneButton(title: "Just chat", target: nil, action: nil)
@@ -66,9 +69,6 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private let focusRightButton = AddPaneButton(title: "Focus Right", target: nil, action: nil)
     private var headerRow: WorkspaceHeaderRow?
     private let bodySurface = WorkspaceSurface()
-    private let claudeConnectButton = ThemedButton(title: "Connect Claude", target: nil, action: nil)
-    private let claudeAccountStatus = NSTextField(wrappingLabelWithString: "Use your Claude Code sign-in on this Mac.")
-    private var claudeSignInTask: Task<Void, Never>?
     private var activityTimer: Timer?
     private var historyCacheTimer: Timer?
     private var startedAt: Date?
@@ -326,7 +326,6 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         outer.addSplitViewItem(sidebarItem)
         let body = NSViewController(); body.view = bodySurface
         heading.font = .systemFont(ofSize: 17, weight: .semibold); heading.lineBreakMode = .byTruncatingTail
-        loginButton.target = self; loginButton.action = #selector(signIn(_:))
         let settings = settingsButton
         settings.target = self; settings.action = #selector(showSettings(_:))
         settings.symbolName = "gearshape"
@@ -895,9 +894,10 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                 if session.provider == .local {
                     return try await ChatThreadSummary.generateLocally(input: input, model: session.inferenceSettings.model, registry: self.localModels)
                 }
-                let executable = try session.provider == .claude ? ClaudeConnection.executable() : self.executable(allowPrompt: false)
+                let executable = try session.provider == .claude ? ClaudeConnection.executable() : CodexExecutable.resolve(allowPrompt: false)
                 return try await ChatThreadSummary.generate(input: input, provider: session.provider,
-                                                            model: session.inferenceSettings.model, executable: executable)
+                                                            model: session.inferenceSettings.model, executable: executable,
+                                                            apiKey: session.provider == .codex ? CodexConnection.sessionAPIKey : ClaudeConnection.sessionAPIKey)
             }, updated: { [weak self] in self?.refreshNavigation() })
         }
         conversationSidebar.reloadData()
@@ -1009,15 +1009,6 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                 return
             }
         }
-    }
-    private func executable(allowPrompt: Bool = true) throws -> URL {
-        let bundled = Bundle.main.resourceURL?.appendingPathComponent("codex/bin/codex")
-        let paths: [String?] = [UserDefaults.standard.string(forKey: "codexPath"), bundled?.path, "/opt/homebrew/bin/codex", "/usr/local/bin/codex", FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/codex").path]
-        for path in paths.compactMap({ $0 }) where FileManager.default.isExecutableFile(atPath: path) { return URL(fileURLWithPath: path) }
-        guard allowPrompt else { throw CodexConnection.error("Install Codex to find previous conversations.") }
-        let panel = NSOpenPanel(); panel.title = "Select the Codex executable"; panel.message = "Choose a native codex executable. The build launcher can bundle Codex for you."; panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { throw CodexConnection.error("No Codex executable selected.") }
-        UserDefaults.standard.set(url.path, forKey: "codexPath"); return url
     }
     private func run(_ operation: @escaping () async throws -> Void) {
         Task { @MainActor in do { try await operation() } catch { let alert = NSAlert(error: error); alert.runModal() } }
@@ -1172,7 +1163,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
 
     private func historyReader() throws -> ProjectHistory {
         if let projectHistory { return projectHistory }
-        let reader = ProjectHistory(executable: try executable(allowPrompt: false))
+        let reader = ProjectHistory(executable: try CodexExecutable.resolve(allowPrompt: false))
         projectHistory = reader
         return reader
     }
@@ -1249,7 +1240,6 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         providerPicker.selectItem(at: AgentProvider.allCases.firstIndex(of: provider) ?? 0)
         populateModelList(modelCatalog.models(for: provider))
         access.title = provider.accessLabel
-        loginButton.title = "Connect ChatGPT"
         refreshModelsIfNeeded()
     }
     func menuWillOpen(_ menu: NSMenu) {
@@ -1291,7 +1281,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                     self.modelCatalog.update(ModelCatalog.geminiRecords, for: .gemini)
                     return
                 }
-                let executable = try provider == .claude ? ClaudeConnection.executable() : self.executable(allowPrompt: false)
+                let executable = try provider == .claude ? ClaudeConnection.executable() : CodexExecutable.resolve(allowPrompt: false)
                 let list = try await ProviderModelDiscovery.models(for: provider, executable: executable)
                 try Task.checkCancellation()
                 guard !self.stopped else { return }
@@ -1471,8 +1461,6 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
 
     @objc func showSettings(_ sender: Any?) {
         if settingsController == nil {
-            claudeConnectButton.target = self
-            claudeConnectButton.action = #selector(connectClaudeAccount(_:))
             settingsController = SettingsWindowController(
                 target: self,
                 actions: [
@@ -1481,60 +1469,22 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                     .fork: #selector(forkSession(_:)), .requests: #selector(showRequests(_:)),
                     .snapshot: #selector(showProtocol(_:)), .export: #selector(exportLog(_:))
                 ],
-                chatGPTButton: loginButton, claudeButton: claudeConnectButton,
-                claudeStatus: claudeAccountStatus, localModels: localModels)
+                accounts: accounts, localModels: localModels)
             settingsController?.scansLocalModelsWhenShown = automaticallyDiscoverModels
         }
         settingsController?.showWindow(sender)
     }
-    @objc func signIn(_ sender: Any?) {
-        selectProvider(.codex)
-        if focusedColumn.session == nil { newChat(sender) }
-        guard let s = focusedColumn.session else { return }
-        run { try await s.connect(self.executable()); try await s.loginIfNeeded(); self.loginButton.title = "ChatGPT connected" }
+    private func connectAccount(_ provider: AccountProvider, apiKey: String?, status: (String) -> Void) async throws -> String {
+        let executable = try provider == .codex ? CodexExecutable.resolve() : ClaudeConnection.executable()
+        let result = try await provider.connect(apiKey: apiKey, executable: executable,
+                                                sessions: { self.sessions }, configureQueue: configureQueue, status: status)
+        selectProvider(provider.agent)
+        if focusedColumn.session == nil { newChat(nil) }
+        return result
     }
     private func selectProvider(_ provider: AgentProvider) {
         providerPicker.selectItem(at: AgentProvider.allCases.firstIndex(of: provider) ?? 0)
         providerSelected()
-    }
-    @objc func connectClaudeAccount(_ sender: Any?) {
-        guard claudeSignInTask == nil else { return }
-        claudeConnectButton.isEnabled = false
-        claudeAccountStatus.stringValue = "Checking Claude Code sign-in…"
-        claudeSignInTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.claudeSignInTask = nil; self.claudeConnectButton.isEnabled = true }
-            do {
-                let executable = try ClaudeConnection.executable()
-                if try await ClaudeConnection.isAuthenticated() == false {
-                    let script = FileManager.default.temporaryDirectory.appendingPathComponent("thoughtstream-claude-\(UUID().uuidString).command")
-                    try ClaudeConnection.signInScript(executable: executable).write(to: script, atomically: true, encoding: .utf8)
-                    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
-                    defer { try? FileManager.default.removeItem(at: script) }
-                    let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-                    _ = try await NSWorkspace.shared.open([script], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration())
-                    self.claudeAccountStatus.stringValue = "Finish signing in in Terminal and your browser. Waiting for Claude…"
-                    var signedIn = false
-                    for _ in 0..<150 {
-                        try await Task.sleep(nanoseconds: 2_000_000_000)
-                        try Task.checkCancellation()
-                        if try await ClaudeConnection.isAuthenticated() { signedIn = true; break }
-                    }
-                    guard signedIn else { throw CodexConnection.error("Sign-in is still pending. Finish in Terminal, then click Connect Claude again.") }
-                }
-                try Task.checkCancellation()
-                self.selectProvider(.claude)
-                if self.focusedColumn.session == nil { self.newChat(nil) }
-                guard let session = self.focusedColumn.session else { return }
-                try await session.connect(executable)
-                self.claudeAccountStatus.stringValue = "Claude connected. Choose a model and send a message."
-                self.claudeConnectButton.title = "Claude connected"
-            } catch is CancellationError {
-                self.claudeAccountStatus.stringValue = "Sign-in cancelled. You can connect again when ready."
-            } catch {
-                self.claudeAccountStatus.stringValue = error.localizedDescription
-            }
-        }
     }
     private var focusedColumn: ChatColumn {
         if let responder = window?.firstResponder as? NSView,
@@ -1542,15 +1492,15 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         return activeColumnID.flatMap { columnStore[$0] } ?? primaryColumn
     }
     private func configureQueue(for session: Session) {
-        session.configureMessageQueue { [weak self, weak session] in
-            guard let self, let session else { throw CancellationError() }
+        session.configureMessageQueue { [weak session] in
+            guard let session else { throw CancellationError() }
             // A local model needs no executable, sign-in or Internet.
             if session.provider == .local { try await session.connectLocal(); return }
             if session.provider == .gemini {
                 try await session.connect(GeminiConnection.executable())
                 return
             }
-            let executable = try session.provider == .claude ? ClaudeConnection.executable() : self.executable(allowPrompt: false)
+            let executable = try session.provider == .claude ? ClaudeConnection.executable() : CodexExecutable.resolve(allowPrompt: false)
             try await session.connect(executable)
             guard try await session.isAuthenticated() else {
                 throw CodexConnection.error("Sign in to \(session.provider.label), then retry this queued message.")
@@ -1957,7 +1907,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         threadSummaries.stop()
         localSearch.stop(); searchOpenTask?.cancel()
         offlineIndicator?.stop(); offlineIndicator = nil
-        claudeSignInTask?.cancel()
+        accounts.forEach { $0.cancel() }
         modelRefreshTasks.values.forEach { $0.cancel() }; modelRefreshTasks.removeAll()
         historySearches.values.forEach { $0.cancel() }; historyLoads.values.forEach { $0.cancel() }
         projectHistory?.stop()

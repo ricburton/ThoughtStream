@@ -24,38 +24,7 @@ final class ClaudeConnection {
     private var stderrText = ""
 
     static func executable() throws -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let paths = [UserDefaults.standard.string(forKey: "claudePath"), home + "/.local/bin/claude",
-                     "/opt/homebrew/bin/claude", "/usr/local/bin/claude", home + "/.claude/local/claude"]
-            .compactMap { $0 } + (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map { String($0) + "/claude" }
-        guard let path = paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            throw CodexConnection.error("Install Claude Code, then sign in with ‘claude auth login’ in Terminal.")
-        }
-        return URL(fileURLWithPath: path)
-    }
-
-    static func isAuthenticated() async throws -> Bool {
-        let executable = try executable()
-        return try await Task.detached {
-            let task = Process(), output = Pipe()
-            task.executableURL = executable; task.arguments = ["auth", "status"]
-            task.standardOutput = output; task.standardError = FileHandle.nullDevice
-            try task.run()
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-            let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            return value?["loggedIn"] as? Bool == true
-        }.value
-    }
-
-    /// Launch the official interactive sign-in, preserving a custom account
-    /// directory. Quote paths as shell data, including apostrophes and spaces.
-    static func signInScript(executable: URL, configDirectory: String? = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"]) -> String {
-        func quote(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-        var script = "#!/bin/zsh\nunset CLAUDECODE\n"
-        if let configDirectory { script += "export CLAUDE_CONFIG_DIR=\(quote(configDirectory))\n" }
-        script += "exec \(quote(executable.path)) auth login --claudeai\n"
-        return script
+        try ClaudeExecutable.resolve()
     }
 
     static func arguments(settings: InferenceSettings, mode: AccessMode, resume: String?, fork: Bool, models: [[String: Any]] = []) -> [String] {
@@ -99,8 +68,8 @@ final class ClaudeConnection {
         input = stdin; output = stdout; errors = stderr; intentionalStop = false
         task.executableURL = executable; task.currentDirectoryURL = project
         task.arguments = discoveryOnly ? Self.discoveryArguments : Self.arguments(settings: settings, mode: AccessMode.selected, resume: resume, fork: fork, models: models)
-        var env = ProcessInfo.processInfo.environment
-        env.removeValue(forKey: "CLAUDECODE")
+        let key = Self.sessionAPIKey
+        var env = Self.environment(for: key, inheriting: ProcessInfo.processInfo.environment)
         env["PATH"] = [FileManager.default.homeDirectoryForCurrentUser.path + "/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", env["PATH"] ?? "/usr/bin:/bin"].joined(separator: ":")
         task.environment = env
         task.standardInput = stdin; task.standardOutput = stdout; task.standardError = stderr
@@ -111,7 +80,7 @@ final class ClaudeConnection {
         }
         stderr.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let bytes = handle.availableData
-            guard !bytes.isEmpty else { return }
+            guard !bytes.isEmpty, key == nil else { return }
             Task { @MainActor [weak self] in
                 let text = String(decoding: bytes, as: UTF8.self)
                 self?.stderrText += text

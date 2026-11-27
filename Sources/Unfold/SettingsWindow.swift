@@ -72,8 +72,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     /// contacts a local server.
     var scansLocalModelsWhenShown = false
 
-    init(target: AnyObject, actions: [Action: Selector], chatGPTButton: NSButton,
-         claudeButton: NSButton, claudeStatus: NSTextField, localModels: LocalModelRegistry? = nil) {
+    init(target: AnyObject, actions: [Action: Selector], accounts: [ProviderAccountControls],
+         localModels: LocalModelRegistry? = nil) {
         self.localModels = localModels ?? .shared
         let panel = SettingsPanel(contentRect: NSRect(x: 0, y: 0, width: 900, height: 640),
                                   styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -99,20 +99,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             ])
         pages[.general] = page([layoutSection], note: "Each chat has its own region of the screen.")
 
-        chatGPTButton.bezelStyle = .rounded
-        chatGPTButton.font = Typography.interface
-        claudeButton.bezelStyle = .rounded
-        claudeButton.font = Typography.interface
-        claudeStatus.font = Typography.caption
-        claudeStatus.textColor = FeedPalette.muted
-        claudeStatus.isSelectable = true
-        claudeStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        pages[.accounts] = page([
-            section("Connected services", rows: [
-                row("ChatGPT", detail: "Connect your account to use Codex.", controls: [chatGPTButton]),
-                row("Claude", detailView: claudeStatus, controls: [claudeButton])
-            ])
-        ], note: "Choose a service in the sidebar when starting a chat. Existing chats keep their service.")
+        pages[.accounts] = page(accounts.map(accountSection), note: "API keys are kept in memory until you quit.")
 
         pages[.localModels] = makeLocalModelsPage()
 
@@ -519,6 +506,24 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         stack.spacing = 10
         card.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         return stack
+    }
+
+    private func accountSection(_ controls: ProviderAccountControls) -> NSView {
+        let local = NSStackView(views: [text("Local CLI sign-in"), NSView(), controls.connectLocal])
+        let entry = NSStackView(views: [controls.keyField, controls.connectKey])
+        let footer = NSStackView(views: [controls.status, NSView(), controls.getKey])
+        for line in [local, entry, footer] {
+            line.orientation = .horizontal
+            line.alignment = .centerY
+            line.spacing = 8
+        }
+        local.edgeInsets = NSEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
+        let keyRow = NSStackView(views: [entry, footer])
+        keyRow.orientation = .vertical
+        keyRow.spacing = 6
+        keyRow.edgeInsets = NSEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
+        for line in [entry, footer] { line.widthAnchor.constraint(equalTo: keyRow.widthAnchor).isActive = true }
+        return section(controls.provider.title, rows: [local, keyRow])
     }
 
     private func row(_ title: String, detail: String, controls: [NSView]) -> NSView {
