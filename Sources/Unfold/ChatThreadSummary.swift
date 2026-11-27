@@ -119,9 +119,11 @@ enum ChatThreadSummary {
                 task.executableURL = executable; task.currentDirectoryURL = directory
                 task.arguments = arguments(provider: provider, model: model)
                 var environment = ProcessInfo.processInfo.environment
-                for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "CLAUDECODE"] { environment.removeValue(forKey: key) }
-                if provider == .codex, let apiKey { environment["CODEX_API_KEY"] = apiKey }
-                task.environment = environment
+                for key in ["OPENAI_API_KEY", CodexConnection.execAPIKeyVariable, ClaudeConnection.apiKeyVariable, "CLAUDECODE"] { environment.removeValue(forKey: key) }
+                if provider == .codex, let apiKey { environment[CodexConnection.execAPIKeyVariable] = apiKey }
+                task.environment = provider == .claude
+                    ? ClaudeConnection.environment(for: apiKey, inheriting: environment)
+                    : environment
                 task.standardInput = stdin; task.standardOutput = stdout; task.standardError = FileHandle.nullDevice
                 try process.start(task)
                 let timeout = DispatchWorkItem { process.cancel() }

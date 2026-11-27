@@ -601,12 +601,7 @@ final class Session {
         if provider == .local { return true }
         if provider == .claude { return try await ClaudeConnection.isAuthenticated() }
         guard let client = client, ready else { return false }
-        let mode = try await codexAccountType(client)
-        return mode == "chatgpt" || mode == "apiKey"
-    }
-    private func codexAccountType(_ client: CodexConnection) async throws -> String? {
-        let result = try await client.request("account/read", ["refreshToken": false])
-        return (result["account"] as? [String: Any])?["type"] as? String
+        return try await client.accountType() != nil
     }
 
     @discardableResult
@@ -620,11 +615,9 @@ final class Session {
             throw CodexConnection.error("Sign in to Claude Code in Terminal with: claude auth login. Then return here and send again.")
         }
         guard let client = client, ready else { throw CodexConnection.error("Connect Codex first.") }
-        if try await codexAccountType(client) == "chatgpt" { onStatus?("ChatGPT connected"); return true }
-        let result = try await client.request("account/login/start", ["type": "chatgpt"])
-        if let text = result["authUrl"] as? String, let url = URL(string: text), url.scheme == "https", url.host == "auth.openai.com" {
-            NSWorkspace.shared.open(url); onStatus?("Finish signing in in your browser")
-        } else { throw CodexConnection.error("Codex did not provide a ChatGPT sign-in URL.") }
+        if try await client.accountType() == .chatGPT { onStatus?("ChatGPT connected"); return true }
+        NSWorkspace.shared.open(try await client.startChatGPTLogin())
+        onStatus?("Finish signing in in your browser")
         return false
     }
     static func messageInput(_ prompt: String, attachments: [ChatAttachment]) throws -> [[String: Any]] {

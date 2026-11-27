@@ -4,6 +4,11 @@ import Foundation
 final class CodexConnection {
     // API-key sessions use dedicated stdio processes with memory-only credentials.
     static var sessionAPIKey: String?
+    enum AccountType: String { case chatGPT = "chatgpt", apiKey }
+    nonisolated static let execAPIKeyVariable = "CODEX_API_KEY"
+    private static let accountRead = "account/read"
+    private static let accountLogin = "account/login/start"
+    private static let memoryOnlyStore = "cli_auth_credentials_store=\"ephemeral\""
     var onEvent: (([String: Any]) -> Void)?
     var onDisconnect: (() -> Void)?
     var onNetworkActivity: () -> Void = { ConnectivityMonitor.shared.recordNetworkActivity() }
@@ -36,15 +41,28 @@ final class CodexConnection {
         try await startStdio(executable: executable, directory: directory, ephemeral: false)
     }
 
+    func accountType() async throws -> AccountType? {
+        let result = try await request(Self.accountRead, ["refreshToken": false])
+        guard let type = (result["account"] as? [String: Any])?["type"] as? String else { return nil }
+        return AccountType(rawValue: type)
+    }
+
+    func startChatGPTLogin() async throws -> URL {
+        let result = try await request(Self.accountLogin, ["type": AccountType.chatGPT.rawValue])
+        guard let text = result["authUrl"] as? String, let url = URL(string: text),
+              url.scheme == "https", url.host == "auth.openai.com" else {
+            throw Self.error("Codex did not provide a ChatGPT sign-in URL.")
+        }
+        return url
+    }
+
     func startWithKey(_ key: String, executable: URL, directory: URL) async throws {
         configuringAPIKey = true
         defer { configuringAPIKey = false }
         try await startStdio(executable: executable, directory: directory, ephemeral: true)
         do {
-            let response = try await request("account/login/start", ["type": "apiKey", "apiKey": key])
-            let account = try await request("account/read", ["refreshToken": false])
-            guard response["type"] as? String == "apiKey",
-                  (account["account"] as? [String: Any])?["type"] as? String == "apiKey" else {
+            let response = try await request(Self.accountLogin, ["type": AccountType.apiKey.rawValue, "apiKey": key])
+            guard response["type"] as? String == AccountType.apiKey.rawValue, try await accountType() == .apiKey else {
                 throw Self.error("Codex did not accept API-key mode.")
             }
         } catch {
@@ -58,12 +76,12 @@ final class CodexConnection {
         task.executableURL = executable
         task.currentDirectoryURL = directory
         task.arguments = ephemeral
-            ? ["-c", "cli_auth_credentials_store=\"ephemeral\"", "app-server"]
+            ? ["-c", Self.memoryOnlyStore, "app-server"]
             : ["app-server"]
         task.standardInput = input; task.standardOutput = output; task.standardError = errors
         var environment = ProcessInfo.processInfo.environment
         environment.removeValue(forKey: "OPENAI_API_KEY")
-        environment.removeValue(forKey: "CODEX_API_KEY")
+        environment.removeValue(forKey: Self.execAPIKeyVariable)
         task.environment = environment
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData

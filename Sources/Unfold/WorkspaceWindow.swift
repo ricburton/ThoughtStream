@@ -54,10 +54,10 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private var localObservers: [NSObjectProtocol] = []
     private var prompt: ComposerTextView { primaryColumn.prompt }
     private let heading = NSTextField(labelWithString: "ThoughtStream")
-    private var changingCodexAccount = false
-    private let apiKeyField = NSSecureTextField()
-    private let apiKeyButton = ThemedButton(title: "Connect with API Key", target: nil, action: nil)
-    private let loginButton = ThemedButton(title: "Connect Local Codex", target: nil, action: nil)
+    private lazy var accounts = ProviderAccountControls.all { [weak self] provider, key, status in
+        guard let self else { throw CancellationError() }
+        return try await self.connectAccount(provider, apiKey: key, status: status)
+    }
     private let settingsButton = AddPaneButton(title: "Settings", target: nil, action: nil)
     private let rebalanceButton = AddPaneButton(title: "Rebalance", target: nil, action: nil)
     private let chatDisplayButton = AddPaneButton(title: "Just chat", target: nil, action: nil)
@@ -69,9 +69,6 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
     private let focusRightButton = AddPaneButton(title: "Focus Right", target: nil, action: nil)
     private var headerRow: WorkspaceHeaderRow?
     private let bodySurface = WorkspaceSurface()
-    private let claudeConnectButton = ThemedButton(title: "Connect Claude", target: nil, action: nil)
-    private let claudeAccountStatus = NSTextField(wrappingLabelWithString: "Use your Claude Code sign-in on this Mac.")
-    private var claudeSignInTask: Task<Void, Never>?
     private var activityTimer: Timer?
     private var historyCacheTimer: Timer?
     private var startedAt: Date?
@@ -329,7 +326,6 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         outer.addSplitViewItem(sidebarItem)
         let body = NSViewController(); body.view = bodySurface
         heading.font = .systemFont(ofSize: 17, weight: .semibold); heading.lineBreakMode = .byTruncatingTail
-        loginButton.target = self; loginButton.action = #selector(signIn(_:))
         let settings = settingsButton
         settings.target = self; settings.action = #selector(showSettings(_:))
         settings.symbolName = "gearshape"
@@ -898,10 +894,10 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                 if session.provider == .local {
                     return try await ChatThreadSummary.generateLocally(input: input, model: session.inferenceSettings.model, registry: self.localModels)
                 }
-                let executable = try session.provider == .claude ? ClaudeConnection.executable() : self.executable(allowPrompt: false)
+                let executable = try session.provider == .claude ? ClaudeConnection.executable() : CodexExecutable.resolve(allowPrompt: false)
                 return try await ChatThreadSummary.generate(input: input, provider: session.provider,
                                                             model: session.inferenceSettings.model, executable: executable,
-                                                            apiKey: session.provider == .codex ? CodexConnection.sessionAPIKey : nil)
+                                                            apiKey: session.provider == .codex ? CodexConnection.sessionAPIKey : ClaudeConnection.sessionAPIKey)
             }, updated: { [weak self] in self?.refreshNavigation() })
         }
         conversationSidebar.reloadData()
@@ -1013,43 +1009,6 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                 return
             }
         }
-    }
-    private func executable(allowPrompt: Bool = true) throws -> URL {
-        let files = FileManager.default
-        let paths: [String?] = [
-            UserDefaults.standard.string(forKey: "codexPath"),
-            Bundle.main.resourceURL?.appendingPathComponent("codex/bin/codex").path,
-            "/opt/homebrew/bin/codex", "/usr/local/bin/codex",
-            files.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/codex").path,
-            "/Applications/ChatGPT.app",
-            files.homeDirectoryForCurrentUser.appendingPathComponent("Applications/ChatGPT.app").path
-        ]
-        func resolve(_ path: String) -> URL? {
-            var url = URL(fileURLWithPath: path)
-            if url.pathExtension.lowercased() == "app" {
-                url.appendPathComponent("Contents/Resources/codex-cli/bin/codex")
-            }
-            let resolved = url.resolvingSymlinksInPath()
-            guard (try? resolved.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
-                  files.isExecutableFile(atPath: resolved.path) else { return nil }
-            return url
-        }
-        for path in paths.compactMap({ $0 }) {
-            if let url = resolve(path) { return url }
-        }
-        guard allowPrompt else { throw CodexConnection.error("Install Codex to find previous conversations.") }
-        let panel = NSOpenPanel()
-        panel.title = "Select Codex"
-        panel.message = "Choose the codex executable or the ChatGPT app that contains it."
-        panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let selected = panel.url else {
-            throw CodexConnection.error("No Codex executable selected.")
-        }
-        guard let url = resolve(selected.path) else {
-            throw CodexConnection.error("This selection does not contain an executable Codex CLI.")
-        }
-        UserDefaults.standard.set(url.path, forKey: "codexPath")
-        return url
     }
     private func run(_ operation: @escaping () async throws -> Void) {
         Task { @MainActor in do { try await operation() } catch { let alert = NSAlert(error: error); alert.runModal() } }
@@ -1204,7 +1163,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
 
     private func historyReader() throws -> ProjectHistory {
         if let projectHistory { return projectHistory }
-        let reader = ProjectHistory(executable: try executable(allowPrompt: false))
+        let reader = ProjectHistory(executable: try CodexExecutable.resolve(allowPrompt: false))
         projectHistory = reader
         return reader
     }
@@ -1322,7 +1281,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                     self.modelCatalog.update(ModelCatalog.geminiRecords, for: .gemini)
                     return
                 }
-                let executable = try provider == .claude ? ClaudeConnection.executable() : self.executable(allowPrompt: false)
+                let executable = try provider == .claude ? ClaudeConnection.executable() : CodexExecutable.resolve(allowPrompt: false)
                 let list = try await ProviderModelDiscovery.models(for: provider, executable: executable)
                 try Task.checkCancellation()
                 guard !self.stopped else { return }
@@ -1502,10 +1461,6 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
 
     @objc func showSettings(_ sender: Any?) {
         if settingsController == nil {
-            apiKeyButton.target = self
-            apiKeyButton.action = #selector(connectOpenAIKey(_:))
-            claudeConnectButton.target = self
-            claudeConnectButton.action = #selector(connectClaudeAccount(_:))
             settingsController = SettingsWindowController(
                 target: self,
                 actions: [
@@ -1514,110 +1469,52 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
                     .fork: #selector(forkSession(_:)), .requests: #selector(showRequests(_:)),
                     .snapshot: #selector(showProtocol(_:)), .export: #selector(exportLog(_:))
                 ],
-                localCodexButton: loginButton, apiKeyField: apiKeyField, apiKeyButton: apiKeyButton, claudeButton: claudeConnectButton,
-                claudeStatus: claudeAccountStatus, localModels: localModels)
+                accounts: accounts, localModels: localModels)
             settingsController?.scansLocalModelsWhenShown = automaticallyDiscoverModels
         }
         settingsController?.showWindow(sender)
     }
-    @objc func getOpenAIKey(_ sender: Any?) {
-        NSWorkspace.shared.open(URL(string: "https://platform.openai.com/api-keys")!)
-    }
-
-    private func switchCodexAccount(to key: String?) throws {
-        let chats = sessions.filter { $0.provider == .codex }
-        guard !chats.contains(where: { $0.turn != nil || $0.queueWorker != nil }) else {
-            throw CodexConnection.error("Finish the active Codex turn before changing accounts.")
-        }
-        for chat in chats { chat.stop() }
-        CodexConnection.sessionAPIKey = key
-        for chat in chats { configureQueue(for: chat) }
-        apiKeyField.placeholderString = key == nil ? "Enter API key" : "API key connected · Enter a replacement"
-        apiKeyButton.title = key == nil ? "Connect with API Key" : "Update API Key"
-        loginButton.title = "Connect Local Codex"
-    }
-
-    @objc func connectOpenAIKey(_ sender: Any?) {
-        guard !changingCodexAccount else { return }
-        let key = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else {
-            apiKeyField.window?.makeFirstResponder(apiKeyField)
-            return
-        }
-        apiKeyField.stringValue = ""
-        changingCodexAccount = true
-        apiKeyButton.isEnabled = false
-        run {
-            defer {
-                self.changingCodexAccount = false
-                self.apiKeyButton.isEnabled = true
+    private func connectAccount(_ provider: AccountProvider, apiKey: String?, status: (String) -> Void) async throws -> String {
+        let executable: URL
+        switch provider {
+        case .codex:
+            executable = try CodexExecutable.resolve()
+            if let apiKey {
+                let probe = CodexConnection()
+                defer { probe.stop() }
+                try await probe.startWithKey(apiKey, executable: executable, directory: AgentInstructions.runtimeDirectory())
             }
-            let probe = CodexConnection()
-            defer { probe.stop() }
-            try await probe.startWithKey(key, executable: self.executable(), directory: AgentInstructions.runtimeDirectory())
-            try self.switchCodexAccount(to: key)
-            self.selectProvider(.codex)
-            if self.focusedColumn.session == nil { self.newChat(sender) }
-            if let session = self.focusedColumn.session { try await session.connect(self.executable()) }
+        case .claude:
+            executable = try ClaudeConnection.executable()
+            if let apiKey {
+                try await ClaudeConnection.checkAPIKey(apiKey)
+            } else {
+                try await ClaudeConnection.ensureLocalSignIn(executable: executable, status: status)
+            }
         }
-    }
 
-    @objc func signIn(_ sender: Any?) {
-        guard !changingCodexAccount else { return }
-        if CodexConnection.sessionAPIKey != nil {
-            do { try switchCodexAccount(to: nil) }
-            catch { NSAlert(error: error).runModal(); return }
+        try Task.checkCancellation()
+        if provider.currentKey != apiKey {
+            let chats = sessions.filter { $0.provider == provider.agent }
+            guard !chats.contains(where: { $0.turn != nil || $0.queueWorker != nil }) else {
+                throw CodexConnection.error("Finish the active " + provider.title + " turn before changing accounts.")
+            }
+            for chat in chats { chat.stop() }
+            provider.currentKey = apiKey
+            for chat in chats { configureQueue(for: chat) }
         }
-        selectProvider(.codex)
-        if focusedColumn.session == nil { newChat(sender) }
-        guard let s = focusedColumn.session else { return }
-        run {
-            try await s.connect(self.executable())
-            self.loginButton.title = try await s.loginIfNeeded() ? "Local Codex connected" : "Finish browser sign-in"
+        selectProvider(provider.agent)
+        if focusedColumn.session == nil { newChat(nil) }
+        guard let session = focusedColumn.session else { throw CodexConnection.error("Open a chat to connect.") }
+        try await session.connect(executable)
+        if provider == .codex, apiKey == nil, try await !session.loginIfNeeded() {
+            return "Finish ChatGPT sign-in in your browser."
         }
+        return apiKey == nil ? "Connected with local sign-in." : "Connected with API key."
     }
     private func selectProvider(_ provider: AgentProvider) {
         providerPicker.selectItem(at: AgentProvider.allCases.firstIndex(of: provider) ?? 0)
         providerSelected()
-    }
-    @objc func connectClaudeAccount(_ sender: Any?) {
-        guard claudeSignInTask == nil else { return }
-        claudeConnectButton.isEnabled = false
-        claudeAccountStatus.stringValue = "Checking Claude Code sign-in…"
-        claudeSignInTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.claudeSignInTask = nil; self.claudeConnectButton.isEnabled = true }
-            do {
-                let executable = try ClaudeConnection.executable()
-                if try await ClaudeConnection.isAuthenticated() == false {
-                    let script = FileManager.default.temporaryDirectory.appendingPathComponent("thoughtstream-claude-\(UUID().uuidString).command")
-                    try ClaudeConnection.signInScript(executable: executable).write(to: script, atomically: true, encoding: .utf8)
-                    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
-                    defer { try? FileManager.default.removeItem(at: script) }
-                    let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-                    _ = try await NSWorkspace.shared.open([script], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration())
-                    self.claudeAccountStatus.stringValue = "Finish signing in in Terminal and your browser. Waiting for Claude…"
-                    var signedIn = false
-                    for _ in 0..<150 {
-                        try await Task.sleep(nanoseconds: 2_000_000_000)
-                        try Task.checkCancellation()
-                        if try await ClaudeConnection.isAuthenticated() { signedIn = true; break }
-                    }
-                    guard signedIn else { throw CodexConnection.error("Sign-in is still pending. Finish in Terminal, then click Connect Claude again.") }
-                }
-                try Task.checkCancellation()
-                self.selectProvider(.claude)
-                if self.focusedColumn.session == nil { self.newChat(nil) }
-                guard let session = self.focusedColumn.session else { return }
-                try await session.connect(executable)
-                self.claudeAccountStatus.stringValue = "Claude connected. Choose a model and send a message."
-                self.claudeConnectButton.title = "Claude connected"
-            } catch is CancellationError {
-                self.claudeAccountStatus.stringValue = "Sign-in cancelled. You can connect again when ready."
-            } catch {
-                self.claudeAccountStatus.stringValue = error.localizedDescription
-            }
-        }
     }
     private var focusedColumn: ChatColumn {
         if let responder = window?.firstResponder as? NSView,
@@ -1625,15 +1522,15 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         return activeColumnID.flatMap { columnStore[$0] } ?? primaryColumn
     }
     private func configureQueue(for session: Session) {
-        session.configureMessageQueue { [weak self, weak session] in
-            guard let self, let session else { throw CancellationError() }
+        session.configureMessageQueue { [weak session] in
+            guard let session else { throw CancellationError() }
             // A local model needs no executable, sign-in or Internet.
             if session.provider == .local { try await session.connectLocal(); return }
             if session.provider == .gemini {
                 try await session.connect(GeminiConnection.executable())
                 return
             }
-            let executable = try session.provider == .claude ? ClaudeConnection.executable() : self.executable(allowPrompt: false)
+            let executable = try session.provider == .claude ? ClaudeConnection.executable() : CodexExecutable.resolve(allowPrompt: false)
             try await session.connect(executable)
             guard try await session.isAuthenticated() else {
                 throw CodexConnection.error("Sign in to \(session.provider.label), then retry this queued message.")
@@ -2040,7 +1937,7 @@ final class WorkspaceWindow: NSWindowController, NSTableViewDataSource, NSTableV
         threadSummaries.stop()
         localSearch.stop(); searchOpenTask?.cancel()
         offlineIndicator?.stop(); offlineIndicator = nil
-        claudeSignInTask?.cancel()
+        accounts.forEach { $0.cancel() }
         modelRefreshTasks.values.forEach { $0.cancel() }; modelRefreshTasks.removeAll()
         historySearches.values.forEach { $0.cancel() }; historyLoads.values.forEach { $0.cancel() }
         projectHistory?.stop()

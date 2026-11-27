@@ -72,9 +72,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     /// contacts a local server.
     var scansLocalModelsWhenShown = false
 
-    init(target: AnyObject, actions: [Action: Selector], localCodexButton: NSButton,
-         apiKeyField: NSSecureTextField, apiKeyButton: NSButton,
-         claudeButton: NSButton, claudeStatus: NSTextField, localModels: LocalModelRegistry? = nil) {
+    init(target: AnyObject, actions: [Action: Selector], accounts: [ProviderAccountControls],
+         localModels: LocalModelRegistry? = nil) {
         self.localModels = localModels ?? .shared
         let panel = SettingsPanel(contentRect: NSRect(x: 0, y: 0, width: 900, height: 640),
                                   styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -100,40 +99,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             ])
         pages[.general] = page([layoutSection], note: "Each chat has its own region of the screen.")
 
-        localCodexButton.bezelStyle = .rounded
-        localCodexButton.font = Typography.interface
-        claudeButton.bezelStyle = .rounded
-        claudeButton.font = Typography.interface
-        claudeStatus.font = Typography.caption
-        claudeStatus.textColor = FeedPalette.muted
-        claudeStatus.isSelectable = true
-        claudeStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let getKey = ThemedButton(title: "Get API Key…", target: target, action: #selector(WorkspaceWindow.getOpenAIKey(_:)))
-        apiKeyField.placeholderString = "Enter API key"
-        apiKeyField.setAccessibilityLabel("OpenAI API key")
-        apiKeyField.target = apiKeyButton.target
-        apiKeyField.action = apiKeyButton.action
-        let entry = NSStackView(views: [apiKeyField, apiKeyButton])
-        entry.orientation = .horizontal
-        entry.alignment = .centerY
-        entry.spacing = 8
-        entry.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 14, right: 0)
-        apiKeyButton.setContentHuggingPriority(.required, for: .horizontal)
-        apiKeyField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let keyHeader = row("OpenAI API key", detail: "Use your API project for this session.", controls: [getKey])
-        let keyRow = NSStackView(views: [keyHeader, entry])
-        keyRow.orientation = .vertical
-        keyRow.spacing = 0
-        for view in [keyHeader, entry] { view.widthAnchor.constraint(equalTo: keyRow.widthAnchor).isActive = true }
-        pages[.accounts] = page([
-            section("Codex", rows: [
-                row("Local Codex", detail: "Use the ChatGPT sign-in from your installed Codex CLI.", controls: [localCodexButton]),
-                keyRow
-            ]),
-            section("Claude Code", rows: [
-                row("Local Claude", detailView: claudeStatus, controls: [claudeButton])
-            ])
-        ], note: "API keys are kept in memory until you quit.")
+        pages[.accounts] = page(accounts.map(accountSection), note: "API keys are kept in memory until you quit.")
 
         pages[.localModels] = makeLocalModelsPage()
 
@@ -540,6 +506,24 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         stack.spacing = 10
         card.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         return stack
+    }
+
+    private func accountSection(_ controls: ProviderAccountControls) -> NSView {
+        let local = NSStackView(views: [text("Local CLI sign-in"), NSView(), controls.connectLocal])
+        let entry = NSStackView(views: [controls.keyField, controls.connectKey])
+        let footer = NSStackView(views: [controls.status, NSView(), controls.getKey])
+        for line in [local, entry, footer] {
+            line.orientation = .horizontal
+            line.alignment = .centerY
+            line.spacing = 8
+        }
+        local.edgeInsets = NSEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
+        let keyRow = NSStackView(views: [entry, footer])
+        keyRow.orientation = .vertical
+        keyRow.spacing = 6
+        keyRow.edgeInsets = NSEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
+        for line in [entry, footer] { line.widthAnchor.constraint(equalTo: keyRow.widthAnchor).isActive = true }
+        return section(controls.provider.title, rows: [local, keyRow])
     }
 
     private func row(_ title: String, detail: String, controls: [NSView]) -> NSView {
